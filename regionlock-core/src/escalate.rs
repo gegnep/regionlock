@@ -75,33 +75,19 @@ pub fn run_applier(preference: Escalator, operation: &Operation) -> Result<Reply
             attempts.push(format!("{backend} (not installed)"));
             continue;
         }
+        // pkexec authenticates through a polkit agent. Spawn a pkttyagent for
+        // this process BEFORE the attempt: pkexec's own built-in agent does
+        // not cope with our piped stdin (it fails the first try, and a retry
+        // with the agent then double-prompts). Spawning up front gives one
+        // clean terminal prompt. The guard kills the agent when it drops.
+        let _agent = if backend == "pkexec" {
+            PkttyAgent::spawn()
+        } else {
+            None
+        };
         match run_via(backend, &applier, &payload) {
             Ok(reply) => return Ok(reply),
-            Err(reason) => {
-                // pkexec without a polkit agent: start pkttyagent for this
-                // process and retry once before moving on (SPEC).
-                if backend == "pkexec" && find_in_path("pkttyagent").is_some() {
-                    let agent = Command::new("pkttyagent")
-                        .arg("--process")
-                        .arg(std::process::id().to_string())
-                        .stdin(Stdio::null())
-                        .spawn();
-                    if let Ok(mut agent) = agent {
-                        let retry = run_via(backend, &applier, &payload);
-                        let _ = agent.kill();
-                        let _ = agent.wait();
-                        match retry {
-                            Ok(reply) => return Ok(reply),
-                            Err(retry_reason) => {
-                                attempts
-                                    .push(format!("{backend} (with pkttyagent: {retry_reason})"));
-                                continue;
-                            }
-                        }
-                    }
-                }
-                attempts.push(format!("{backend} ({reason})"));
-            }
+            Err(reason) => attempts.push(format!("{backend} ({reason})")),
         }
     }
     Err(Error::Escalation {
@@ -118,6 +104,32 @@ fn run_via(
     let mut cmd = Command::new(backend);
     cmd.arg(applier);
     drive(cmd, payload)
+}
+
+/// A pkttyagent registered for this process, killed on drop. Started before
+/// a pkexec attempt so polkit has a working terminal auth agent and prompts
+/// exactly once. Returns None when pkttyagent is absent (pkexec then falls
+/// back to its own agent).
+struct PkttyAgent(std::process::Child);
+
+impl PkttyAgent {
+    fn spawn() -> Option<PkttyAgent> {
+        find_in_path("pkttyagent")?;
+        Command::new("pkttyagent")
+            .arg("--process")
+            .arg(std::process::id().to_string())
+            .stdin(Stdio::null())
+            .spawn()
+            .ok()
+            .map(PkttyAgent)
+    }
+}
+
+impl Drop for PkttyAgent {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 /// Send the operation on the child's stdin and read its single JSON reply
