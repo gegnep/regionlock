@@ -8,9 +8,10 @@ ConditionPathExists=/etc/regionlock/config.toml
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Runs as root: no escalation inside the unit. --offline applies from the
-# pinned snapshot and never races the network at boot.
-ExecStart=regionlock apply --yes --offline
+# Runs as root: no escalation inside the unit. --system pins config and
+# feed to /etc/regionlock only (a stray root homedir can never shadow the
+# snapshot) and never touches the network at boot.
+ExecStart=regionlock apply --yes --system
 ExecStop=regionlock teardown --yes
 
 [Install]

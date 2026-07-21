@@ -26,6 +26,10 @@ pub const MAX_POPS: usize = 512;
 pub const MAX_IPS_PER_POP: usize = 64;
 /// POP codes: short lowercase alphanumerics (live data: 3-4 chars, digits).
 pub const MAX_POP_CODE_LEN: usize = 16;
+/// Byte cap for each boot-snapshot file in EnablePersist. Real feeds are
+/// ~30 KiB and configs ~1 KiB; 256 KiB leaves generous headroom while an
+/// operation carrying both stays well under the applier's stdin cap.
+pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
 
 /// One privileged request. Serialized as JSON with an `op` tag.
 /// deny_unknown_fields: the boundary rejects payloads carrying anything
@@ -48,8 +52,36 @@ pub enum Operation {
     /// Report the live table (normalized) plus journal state for
     /// `status --verify` and reconciliation. Read-only.
     Inspect { ops_version: u32 },
-    // EnablePersist / DisablePersist land at M5; the tag namespace is
-    // reserved here so the M3 wire format never shifts.
+    /// Install the boot snapshot under /etc/regionlock (fixed filenames:
+    /// config.toml plus the validated feed_filename) and enable
+    /// regionlock.service. The CLI builds the snapshot bytes; the applier
+    /// only writes them. On NixOS-managed units systemctl is skipped.
+    EnablePersist {
+        ops_version: u32,
+        config_toml: String,
+        feed_filename: String,
+        feed_json: String,
+    },
+    /// Disable regionlock.service (skipped when NixOS manages the unit)
+    /// and remove the /etc/regionlock snapshot files. Idempotent.
+    DisablePersist { ops_version: u32 },
+}
+
+/// Parse a boot-snapshot feed filename `feed-<appid>-<revision>.json`.
+/// Both parts are ASCII digits (no sign, no leading `+`), so a valid name
+/// can never contain a path separator or `..`. Shared by operation
+/// validation, the applier's snapshot listing, and offline feed loading.
+pub fn parse_feed_snapshot_filename(name: &str) -> Option<(u32, u64)> {
+    let rest = name.strip_prefix("feed-")?.strip_suffix(".json")?;
+    let (appid, revision) = rest.split_once('-')?;
+    if appid.is_empty()
+        || revision.is_empty()
+        || !appid.bytes().all(|b| b.is_ascii_digit())
+        || !revision.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((appid.parse().ok()?, revision.parse().ok()?))
 }
 
 /// Why an operation was refused. The applier prints these verbatim; they
@@ -63,6 +95,8 @@ pub enum Rejection {
     PopCodeBadChar { code: String },
     NoIps { code: String },
     TooManyIps { code: String, got: usize },
+    BadFeedFilename { name: String },
+    SnapshotTooLarge { file: &'static str, got: usize },
 }
 
 impl std::fmt::Display for Rejection {
@@ -85,6 +119,15 @@ impl std::fmt::Display for Rejection {
             Rejection::TooManyIps { code, got } => {
                 write!(f, "POP {code:?} has {got} IPs, limit {MAX_IPS_PER_POP}")
             }
+            Rejection::BadFeedFilename { name } => {
+                write!(
+                    f,
+                    "feed filename {name:?} does not match feed-<appid>-<revision>.json"
+                )
+            }
+            Rejection::SnapshotTooLarge { file, got } => {
+                write!(f, "{file} is {got} bytes, limit {MAX_SNAPSHOT_BYTES}")
+            }
         }
     }
 }
@@ -94,7 +137,9 @@ impl Operation {
         match self {
             Operation::ReplaceRuleset { ops_version, .. }
             | Operation::DeleteTable { ops_version }
-            | Operation::Inspect { ops_version } => *ops_version,
+            | Operation::Inspect { ops_version }
+            | Operation::EnablePersist { ops_version, .. }
+            | Operation::DisablePersist { ops_version } => *ops_version,
         }
     }
 
@@ -107,36 +152,65 @@ impl Operation {
                 got: self.ops_version(),
             });
         }
-        let Operation::ReplaceRuleset { pops, .. } = self else {
-            return Ok(());
-        };
-        if pops.len() > MAX_POPS {
-            return Err(Rejection::TooManyPops { got: pops.len() });
+        match self {
+            Operation::ReplaceRuleset { pops, .. } => {
+                if pops.len() > MAX_POPS {
+                    return Err(Rejection::TooManyPops { got: pops.len() });
+                }
+                for (code, ips) in pops {
+                    if code.is_empty() {
+                        return Err(Rejection::EmptyPopCode);
+                    }
+                    if code.len() > MAX_POP_CODE_LEN {
+                        return Err(Rejection::PopCodeTooLong { code: code.clone() });
+                    }
+                    if !code
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                    {
+                        return Err(Rejection::PopCodeBadChar { code: code.clone() });
+                    }
+                    if ips.is_empty() {
+                        return Err(Rejection::NoIps { code: code.clone() });
+                    }
+                    if ips.len() > MAX_IPS_PER_POP {
+                        return Err(Rejection::TooManyIps {
+                            code: code.clone(),
+                            got: ips.len(),
+                        });
+                    }
+                }
+                Ok(())
+            }
+            Operation::EnablePersist {
+                config_toml,
+                feed_filename,
+                feed_json,
+                ..
+            } => {
+                if parse_feed_snapshot_filename(feed_filename).is_none() {
+                    return Err(Rejection::BadFeedFilename {
+                        name: feed_filename.clone(),
+                    });
+                }
+                if config_toml.len() > MAX_SNAPSHOT_BYTES {
+                    return Err(Rejection::SnapshotTooLarge {
+                        file: "config_toml",
+                        got: config_toml.len(),
+                    });
+                }
+                if feed_json.len() > MAX_SNAPSHOT_BYTES {
+                    return Err(Rejection::SnapshotTooLarge {
+                        file: "feed_json",
+                        got: feed_json.len(),
+                    });
+                }
+                Ok(())
+            }
+            Operation::DeleteTable { .. }
+            | Operation::Inspect { .. }
+            | Operation::DisablePersist { .. } => Ok(()),
         }
-        for (code, ips) in pops {
-            if code.is_empty() {
-                return Err(Rejection::EmptyPopCode);
-            }
-            if code.len() > MAX_POP_CODE_LEN {
-                return Err(Rejection::PopCodeTooLong { code: code.clone() });
-            }
-            if !code
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-            {
-                return Err(Rejection::PopCodeBadChar { code: code.clone() });
-            }
-            if ips.is_empty() {
-                return Err(Rejection::NoIps { code: code.clone() });
-            }
-            if ips.len() > MAX_IPS_PER_POP {
-                return Err(Rejection::TooManyIps {
-                    code: code.clone(),
-                    got: ips.len(),
-                });
-            }
-        }
-        Ok(())
     }
 
     /// CLI-side constructor: the only sanctioned path from a plan to a
@@ -169,6 +243,16 @@ pub enum Reply {
         journal: Option<crate::plan::AppliedState>,
         /// A pending (uncommitted) journal record was found and reconciled.
         reconciled_pending: bool,
+    },
+    Persisted {
+        /// True when regionlock.service lives in /nix/store: the snapshot
+        /// was written but systemctl was skipped (the module owns
+        /// enablement).
+        managed_by_nixos: bool,
+    },
+    Unpersisted {
+        /// Same detection as [`Reply::Persisted`]; systemctl was skipped.
+        managed_by_nixos: bool,
     },
     Refused {
         reason: String,

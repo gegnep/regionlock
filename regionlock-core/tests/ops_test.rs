@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
 use regionlock_core::Game;
-use regionlock_core::ops::{MAX_IPS_PER_POP, MAX_POPS, OPS_VERSION, Operation, Rejection, Reply};
+use regionlock_core::ops::{
+    MAX_IPS_PER_POP, MAX_POPS, MAX_SNAPSHOT_BYTES, OPS_VERSION, Operation, Rejection, Reply,
+    parse_feed_snapshot_filename,
+};
 use regionlock_core::plan::{AppliedState, RulesetSpec};
 
 fn valid_pops() -> BTreeMap<String, Vec<Ipv4Addr>> {
@@ -28,6 +31,33 @@ fn replace_with_code(code: &str, ips: Vec<Ipv4Addr>) -> Operation {
     replace_with_pops(BTreeMap::from([(code.to_string(), ips)]))
 }
 
+fn valid_enable_persist() -> Operation {
+    Operation::EnablePersist {
+        ops_version: OPS_VERSION,
+        config_toml: "default_game = \"deadlock\"\n".to_string(),
+        feed_filename: "feed-1422450-1784582254.json".to_string(),
+        feed_json: r#"{"revision":1784582254,"pops":{}}"#.to_string(),
+    }
+}
+
+fn enable_persist_with_filename(name: &str) -> Operation {
+    let Operation::EnablePersist {
+        ops_version,
+        config_toml,
+        feed_json,
+        ..
+    } = valid_enable_persist()
+    else {
+        unreachable!()
+    };
+    Operation::EnablePersist {
+        ops_version,
+        config_toml,
+        feed_filename: name.to_string(),
+        feed_json,
+    }
+}
+
 #[test]
 fn valid_replace_ruleset_round_trips_and_validates() {
     let operation = replace_with_pops(valid_pops());
@@ -49,6 +79,13 @@ fn every_operation_kind_rejects_an_unsupported_version() {
         },
         Operation::DeleteTable { ops_version: 99 },
         Operation::Inspect { ops_version: 99 },
+        Operation::EnablePersist {
+            ops_version: 99,
+            config_toml: String::new(),
+            feed_filename: "feed-1-1.json".to_string(),
+            feed_json: String::new(),
+        },
+        Operation::DisablePersist { ops_version: 99 },
     ];
 
     for operation in operations {
@@ -166,6 +203,106 @@ fn dangerous_pop_code_characters_fail_validation() {
 }
 
 #[test]
+fn persist_operations_round_trip_and_validate() {
+    for operation in [
+        valid_enable_persist(),
+        Operation::DisablePersist {
+            ops_version: OPS_VERSION,
+        },
+    ] {
+        let json = serde_json::to_string(&operation).expect("operation serializes");
+        let parsed: Operation = serde_json::from_str(&json).expect("operation parses");
+        assert_eq!(parsed, operation);
+        assert_eq!(parsed.validate(), Ok(()));
+    }
+}
+
+#[test]
+fn bad_feed_filenames_are_rejected() {
+    let cases = [
+        "sdr-1422450-1.json",            // wrong prefix
+        "feed-1422450-1.txt",            // wrong suffix
+        "feed-1422450.json",             // missing revision
+        "feed--1.json",                  // empty appid
+        "feed-1-.json",                  // empty revision
+        "feed-a-1.json",                 // non-digit appid
+        "feed-1-1x.json",                // non-digit revision
+        "feed-+1-1.json",                // sign smuggled past parse()
+        "feed-1-1.json.bak",             // backup name, not canonical
+        "feed-1-2/../evil.json",         // path traversal
+        "feed-1422450-1/x.json",         // path separator
+        "../feed-1422450-1.json",        // leading traversal
+        "feed-99999999999999999-1.json", // appid overflows u32
+        "FEED-1-1.json",                 // case matters
+    ];
+    for name in cases {
+        assert_eq!(parse_feed_snapshot_filename(name), None, "name: {name:?}");
+        assert_eq!(
+            enable_persist_with_filename(name).validate(),
+            Err(Rejection::BadFeedFilename {
+                name: name.to_string(),
+            }),
+            "name: {name:?}"
+        );
+    }
+    assert_eq!(
+        parse_feed_snapshot_filename("feed-1422450-1784582254.json"),
+        Some((1_422_450, 1_784_582_254))
+    );
+}
+
+#[test]
+fn oversize_snapshot_files_are_rejected() {
+    let big = "x".repeat(MAX_SNAPSHOT_BYTES + 1);
+
+    let Operation::EnablePersist {
+        ops_version,
+        feed_filename,
+        feed_json,
+        ..
+    } = valid_enable_persist()
+    else {
+        unreachable!()
+    };
+    let oversized_config = Operation::EnablePersist {
+        ops_version,
+        config_toml: big.clone(),
+        feed_filename: feed_filename.clone(),
+        feed_json,
+    };
+    assert_eq!(
+        oversized_config.validate(),
+        Err(Rejection::SnapshotTooLarge {
+            file: "config_toml",
+            got: MAX_SNAPSHOT_BYTES + 1,
+        })
+    );
+
+    let Operation::EnablePersist {
+        ops_version,
+        config_toml,
+        feed_filename,
+        ..
+    } = valid_enable_persist()
+    else {
+        unreachable!()
+    };
+    let oversized_feed = Operation::EnablePersist {
+        ops_version,
+        config_toml,
+        feed_filename,
+        feed_json: big,
+    };
+    assert_eq!(
+        oversized_feed.validate(),
+        Err(Rejection::SnapshotTooLarge {
+            file: "feed_json",
+            got: MAX_SNAPSHOT_BYTES + 1,
+        })
+    );
+}
+
+#[test]
 fn reply_variants_round_trip_through_json() {
     let spec = RulesetSpec {
         game: Game::Deadlock,
@@ -182,6 +319,12 @@ fn reply_variants_round_trip_through_json() {
             live: Some(journal.pops.clone()),
             journal: Some(journal.clone()),
             reconciled_pending: true,
+        },
+        Reply::Persisted {
+            managed_by_nixos: false,
+        },
+        Reply::Unpersisted {
+            managed_by_nixos: true,
         },
         Reply::Refused {
             reason: "test refusal".to_string(),

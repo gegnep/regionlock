@@ -91,6 +91,12 @@ pub enum Command {
         /// Use only cached/snapshot feed data; never touch the network.
         #[arg(long)]
         offline: bool,
+        /// Boot mode: resolve config and feed from /etc/regionlock ONLY
+        /// (never user config, cache, or network; overrides --config).
+        /// regionlock.service uses this so a stray root homedir can never
+        /// shadow the boot snapshot.
+        #[arg(long)]
+        system: bool,
         /// Print the exact ruleset and exit. No escalation, no mutation.
         #[arg(long)]
         dry_run: bool,
@@ -127,13 +133,18 @@ pub enum Command {
     /// Install persistence: snapshot state to /etc/regionlock and enable
     /// the systemd unit (privileged, idempotent).
     EnablePersist {
+        /// Skip the confirmation prompt.
         #[arg(long)]
         yes: bool,
+        /// Fetch a fresh feed before snapshotting instead of cache-first.
+        #[arg(long)]
+        refresh: bool,
         #[arg(long)]
         json: bool,
     },
     /// Remove persistence (privileged, idempotent).
     DisablePersist {
+        /// Skip the confirmation prompt.
         #[arg(long)]
         yes: bool,
         #[arg(long)]

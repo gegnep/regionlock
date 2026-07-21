@@ -1,7 +1,5 @@
-//! Command implementations: the M1 command set wired to regionlock-core.
-//!
-//! Commands that land at later milestones answer "not yet wired" instead
-//! of touching plumbing.
+//! Command implementations: the complete v1 command set wired to
+//! regionlock-core.
 
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -12,7 +10,7 @@ use clap::CommandFactory;
 use clap_complete::{Shell, generate as write_completions};
 use clap_complete_nushell::Nushell;
 use regionlock_core::backend::{FirewallBackend, NftBackend};
-use regionlock_core::config::{ApplyMode, Config};
+use regionlock_core::config::{ApplyMode, Config, GameConfig};
 use regionlock_core::feed::{self, Pop, SdrFeed};
 use regionlock_core::payload::{
     DeltaPayload, ListPayload, PingValue, PlanPayload, PopInfo, RegionInfo, RegionsPayload,
@@ -35,14 +33,8 @@ use crate::cli::{Cli, Command, GenerateCommand, PresetCommand};
 use crate::output::{Cell, Style, render_table};
 
 /// A command failure. Core errors own their exit code and JSON kind.
-/// Not-yet-wired commands are CLI-level: "not_implemented" is not in core's
-/// frozen kind list, so the CLI composes that stderr object itself.
 pub enum Failure {
     Core(Error),
-    NotWired {
-        what: &'static str,
-        milestone: &'static str,
-    },
     /// Packaging-facing `generate` failure: plain stderr, exit 1. No JSON
     /// shape; the hidden command carries no --json flag.
     Usage {
@@ -57,10 +49,6 @@ impl From<Error> for Failure {
 }
 
 impl Failure {
-    fn not_wired(what: &'static str, milestone: &'static str) -> Self {
-        Failure::NotWired { what, milestone }
-    }
-
     /// Print the error to stderr (a JSON object when --json is active, a
     /// human message otherwise) and return the process exit code.
     pub fn report(&self, json: bool) -> i32 {
@@ -76,22 +64,6 @@ impl Failure {
                     eprintln!("error: {err}");
                 }
                 err.exit_code()
-            }
-            Failure::NotWired { what, milestone } => {
-                let message = format!("not yet wired: {what} lands at {milestone}");
-                if json {
-                    eprintln!(
-                        "{}",
-                        json!({
-                            "schema_version": SCHEMA_VERSION,
-                            "error": message,
-                            "exit_code": 1,
-                        })
-                    );
-                } else {
-                    eprintln!("{message}");
-                }
-                1
             }
             Failure::Usage { message } => {
                 eprintln!("{message}");
@@ -134,16 +106,21 @@ struct Ctx {
 }
 
 pub fn run(cli: &Cli) -> Result<(), Failure> {
-    // Not-yet-wired commands answer before any config or feed plumbing.
-    // generate renders from the grammar alone: no config, cache, or network.
-    match &cli.command {
-        Command::Generate { what } => return cmd_generate(what),
-        Command::EnablePersist { .. } => return Err(Failure::not_wired("enable-persist", "M5")),
-        Command::DisablePersist { .. } => return Err(Failure::not_wired("disable-persist", "M5")),
-        _ => {}
+    // generate renders from the grammar alone: no config, cache, or
+    // network, so it answers before any plumbing.
+    if let Command::Generate { what } = &cli.command {
+        return cmd_generate(what);
     }
 
-    let config_path = Config::resolve_path(cli.config.as_deref())?;
+    // `apply --system` (boot mode) pins the config to /etc/regionlock
+    // unconditionally: root's homedir resolves via the passwd DB even
+    // without $HOME, so a stray /root config could otherwise shadow the
+    // boot snapshot.
+    let config_path = if matches!(&cli.command, Command::Apply { system: true, .. }) {
+        PathBuf::from(regionlock_core::config::ETC_CONFIG_PATH)
+    } else {
+        Config::resolve_path(cli.config.as_deref())?
+    };
     let config = Config::load(&config_path)?;
     let game = regionlock_core::game::resolve(cli.game, config.default_game);
     let mut ctx = Ctx {
@@ -185,15 +162,18 @@ pub fn run(cli: &Cli) -> Result<(), Failure> {
         Command::Apply {
             yes,
             offline,
+            system,
             dry_run,
             verbose,
             json,
-        } => cmd_apply(&ctx, *yes, *offline, *dry_run, *verbose, *json),
+        } => cmd_apply(&ctx, *yes, *offline, *system, *dry_run, *verbose, *json),
         Command::Teardown { yes, json } => cmd_teardown(&ctx, *yes, *json),
         Command::Ping { json } => cmd_ping(&ctx, *json),
-        Command::EnablePersist { .. }
-        | Command::DisablePersist { .. }
-        | Command::Generate { .. } => unreachable!("early-return commands return above"),
+        Command::EnablePersist { yes, refresh, json } => {
+            cmd_enable_persist(&ctx, *yes, *refresh, *json)
+        }
+        Command::DisablePersist { yes, json } => cmd_disable_persist(&ctx, *yes, *json),
+        Command::Generate { .. } => unreachable!("generate returns above"),
     }
 }
 
@@ -317,12 +297,19 @@ fn cmd_apply(
     ctx: &Ctx,
     yes: bool,
     offline: bool,
+    system: bool,
     dry_run: bool,
     verbose: bool,
     json: bool,
 ) -> Result<(), Failure> {
-    let feed = if offline {
-        feed::cache::load_latest(ctx.game)?.ok_or(Error::NoCachedFeed { game: ctx.game })?
+    let feed = if system {
+        // Boot mode: the pinned /etc/regionlock snapshot ONLY. Never the
+        // user cache (a stray root cache must not shadow the snapshot)
+        // and never the network. run() pinned the config the same way.
+        feed::cache::load_etc_snapshot(ctx.game)?.ok_or(Error::NoCachedFeed { game: ctx.game })?
+    } else if offline {
+        // User cache first, then the /etc/regionlock boot snapshot.
+        feed::cache::load_offline(ctx.game)?.ok_or(Error::NoCachedFeed { game: ctx.game })?
     } else {
         load_feed(ctx.game)?
     };
@@ -422,6 +409,138 @@ fn cmd_teardown(ctx: &Ctx, yes: bool, json: bool) -> Result<(), Failure> {
                 println!("table inet regionlock removed");
             } else {
                 println!("no table to remove");
+            }
+            Ok(())
+        }
+        regionlock_core::ops::Reply::Refused { reason } => {
+            Err(Error::ApplierRefused { reason }.into())
+        }
+        other => Err(Failure::Usage {
+            message: format!("unexpected applier reply: {other:?}"),
+        }),
+    }
+}
+
+/// enable-persist: build the boot snapshot in userspace (minimal config
+/// for the active game plus the pinned raw feed bytes) and hand it to the
+/// applier, which writes /etc/regionlock itself and enables the unit.
+fn cmd_enable_persist(ctx: &Ctx, yes: bool, refresh: bool, json: bool) -> Result<(), Failure> {
+    let feed = if refresh {
+        feed::acquire(ctx.game, false)?
+    } else {
+        load_feed(ctx.game)?
+    };
+    // Pin the exact raw body cached for this revision, not a
+    // re-serialization: `apply --offline` at boot parses these bytes.
+    let raw_path = feed::cache::raw_path(ctx.game, feed.revision)?;
+    let raw = std::fs::read(&raw_path).map_err(|source| Error::Io {
+        path: raw_path.clone(),
+        source,
+    })?;
+    let feed_json = String::from_utf8(raw).map_err(|_| Failure::Usage {
+        message: format!("cached feed {} is not UTF-8", raw_path.display()),
+    })?;
+    let desired = ctx.config.desired(ctx.game);
+
+    // Minimal boot config: the persisted game is the default and carries
+    // its current desired blocklist. Boot `apply` (root, no --config, no
+    // user XDG) resolves to /etc/regionlock/config.toml via the existing
+    // resolution chain.
+    let snapshot = Config {
+        default_game: ctx.game,
+        games: BTreeMap::from([(
+            ctx.game,
+            GameConfig {
+                desired: desired.clone(),
+                presets: BTreeMap::new(),
+            },
+        )]),
+        ..Config::default()
+    };
+    let config_toml = snapshot.to_toml_string().map_err(|e| Failure::Usage {
+        message: format!("could not serialize the boot config: {e}"),
+    })?;
+
+    if !yes {
+        println!(
+            "enable-persist writes a boot snapshot to /etc/regionlock and enables regionlock.service."
+        );
+        println!("  game: {} (rev {})", ctx.game.name(), feed.revision);
+        println!("  blocked POPs at boot: {}", desired.blocked.len());
+        if !confirm("Enable persistence", "", true)? {
+            eprintln!("aborted");
+            return Err(Failure::Usage {
+                message: "enable-persist aborted".into(),
+            });
+        }
+    }
+
+    let operation = regionlock_core::ops::Operation::EnablePersist {
+        ops_version: regionlock_core::ops::OPS_VERSION,
+        config_toml,
+        feed_filename: format!("feed-{}-{}.json", ctx.game.appid(), feed.revision),
+        feed_json,
+    };
+    let reply = regionlock_core::escalate::run_applier(ctx.config.escalator, &operation)?;
+    match reply {
+        regionlock_core::ops::Reply::Persisted { managed_by_nixos } => {
+            if json {
+                println!(
+                    "{}",
+                    json!({ "schema_version": SCHEMA_VERSION, "persisted": true, "managed_by_nixos": managed_by_nixos })
+                );
+            } else if managed_by_nixos {
+                println!("snapshot written to /etc/regionlock");
+                println!(
+                    "regionlock.service is managed by NixOS; enable it via the programs.regionlock module, not systemctl"
+                );
+            } else {
+                println!(
+                    "persistence enabled: snapshot in /etc/regionlock, regionlock.service enabled"
+                );
+            }
+            Ok(())
+        }
+        regionlock_core::ops::Reply::Refused { reason } => {
+            Err(Error::ApplierRefused { reason }.into())
+        }
+        other => Err(Failure::Usage {
+            message: format!("unexpected applier reply: {other:?}"),
+        }),
+    }
+}
+
+fn cmd_disable_persist(ctx: &Ctx, yes: bool, json: bool) -> Result<(), Failure> {
+    if !yes {
+        println!(
+            "disable-persist disables regionlock.service and removes the /etc/regionlock snapshot."
+        );
+        println!("Desired state and the live firewall stay untouched.");
+        if !confirm("Disable persistence", "", true)? {
+            eprintln!("aborted");
+            return Err(Failure::Usage {
+                message: "disable-persist aborted".into(),
+            });
+        }
+    }
+    let operation = regionlock_core::ops::Operation::DisablePersist {
+        ops_version: regionlock_core::ops::OPS_VERSION,
+    };
+    let reply = regionlock_core::escalate::run_applier(ctx.config.escalator, &operation)?;
+    match reply {
+        regionlock_core::ops::Reply::Unpersisted { managed_by_nixos } => {
+            if json {
+                println!(
+                    "{}",
+                    json!({ "schema_version": SCHEMA_VERSION, "persisted": false, "managed_by_nixos": managed_by_nixos })
+                );
+            } else if managed_by_nixos {
+                println!("snapshot removed from /etc/regionlock");
+                println!(
+                    "regionlock.service is managed by NixOS; disable it via the programs.regionlock module, not systemctl"
+                );
+            } else {
+                println!("persistence disabled: snapshot removed, regionlock.service disabled");
             }
             Ok(())
         }
@@ -810,7 +929,7 @@ fn finish_mutation(ctx: &Ctx, delta: Delta, apply: bool, json: bool) -> Result<(
     } else {
         // One-shot (-a) or apply_mode = "auto": reconcile now. The Q2
         // confirmation still applies; --yes exists on `apply` for scripts.
-        cmd_apply(ctx, false, false, false, false, json)
+        cmd_apply(ctx, false, false, false, false, false, json)
     }
 }
 

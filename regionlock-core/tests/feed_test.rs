@@ -159,6 +159,54 @@ fn cache_round_trip_picks_highest_revision() {
 }
 
 #[test]
+fn etc_snapshot_loads_newest_matching_feed() {
+    let dir = tempdir("etc-snapshot");
+    let rev1: u64 = 1_784_582_254;
+    let rev2: u64 = 1_784_582_255;
+
+    // The boot snapshot uses feed-<appid>-<revision>.json names, written by
+    // the privileged applier; this test injects a base dir (never real /etc).
+    fs::write(
+        dir.join(format!("feed-{DEADLOCK}-{rev1}.json")),
+        fixture_bytes(DEADLOCK),
+    )
+    .unwrap();
+    let latest = cache::load_etc_snapshot_in(&dir, Game::Deadlock)
+        .expect("load etc snapshot")
+        .expect("snapshot present");
+    assert_eq!(latest.revision, rev1);
+    assert_eq!(latest.pops.len(), 32, "fixture body round-trips intact");
+
+    // A higher revision wins; junk and near-miss names are tolerated.
+    fs::write(
+        dir.join(format!("feed-{DEADLOCK}-{rev2}.json")),
+        format!(r#"{{"revision":{rev2},"pops":{{}}}}"#),
+    )
+    .unwrap();
+    fs::write(dir.join("config.toml"), b"default_game = \"deadlock\"\n").unwrap();
+    fs::write(dir.join(format!("feed-{DEADLOCK}-{rev1}.json.bak")), b"{}").unwrap();
+    fs::write(dir.join(format!("{DEADLOCK}-{rev2}.json")), b"{}").unwrap();
+    let latest = cache::load_etc_snapshot_in(&dir, Game::Deadlock)
+        .expect("load etc snapshot with junk")
+        .expect("snapshot present");
+    assert_eq!(latest.revision, rev2);
+
+    // Other games and missing dirs read as no snapshot.
+    assert!(
+        cache::load_etc_snapshot_in(&dir, Game::Cs2)
+            .expect("load cs2 snapshot")
+            .is_none()
+    );
+    assert!(
+        cache::load_etc_snapshot_in(&dir.join("missing"), Game::Deadlock)
+            .expect("missing dir tolerated")
+            .is_none()
+    );
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn cache_empty_dir_is_none() {
     let dir = tempdir("empty");
     assert!(

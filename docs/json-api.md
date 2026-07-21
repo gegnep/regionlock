@@ -33,13 +33,6 @@ When `--json` is active, failures print one JSON object to stderr:
 `cache_dir_unavailable`, `unknown_selector`, `config`, `unknown_preset`,
 `journal_parse`, `escalation`, `applier_refused`, `io`, `drift`.
 
-Not-yet-implemented commands emit a CLI-composed object WITHOUT a `kind`
-field (the milestone stubs are not core errors):
-
-```json
-{ "schema_version": 1, "error": "not yet wired: enable-persist lands at M5", "exit_code": 1 }
-```
-
 ## `list --json`
 
 ```json
@@ -170,3 +163,17 @@ Escalates, inspects the live table, and diffs it against the journal.
 `verified` false means drift; the command also exits 2. `reconciled_pending`
 true means a crashed apply or delete left a pending record that this run
 reconciled.
+
+## `enable-persist --json` / `disable-persist --json`
+
+Both escalate one privileged operation and report the result:
+
+```json
+{ "schema_version": 1, "persisted": true, "managed_by_nixos": false }
+{ "schema_version": 1, "persisted": false, "managed_by_nixos": false }
+```
+
+`managed_by_nixos` is true when `regionlock.service` resolves into
+`/nix/store`: the snapshot in `/etc/regionlock` was still written (or
+removed), but the applier skipped `systemctl` because the NixOS module owns
+unit enablement.

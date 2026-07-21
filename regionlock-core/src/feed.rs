@@ -143,6 +143,17 @@ pub mod cache {
         Ok(path)
     }
 
+    /// Boot snapshot directory. Written only by the privileged applier
+    /// (EnablePersist); read here as the offline fallback when the user
+    /// cache misses (root at boot has none).
+    pub const ETC_SNAPSHOT_DIR: &str = "/etc/regionlock";
+
+    /// Cached raw-body path for (game, revision), as written by [`store`].
+    /// EnablePersist reads these exact bytes to pin the boot snapshot.
+    pub fn raw_path(game: Game, revision: u64) -> Result<PathBuf> {
+        Ok(dir()?.join(format!("{}-{revision}.json", game.appid())))
+    }
+
     /// Newest cached feed for the game, if any.
     pub fn load_latest(game: Game) -> Result<Option<SdrFeed>> {
         load_latest_in(&dir()?, game)
@@ -152,6 +163,47 @@ pub mod cache {
     /// match `<appid>-<revision>.json` are ignored.
     pub fn load_latest_in(dir: &Path, game: Game) -> Result<Option<SdrFeed>> {
         let prefix = format!("{}-", game.appid());
+        load_newest_in(dir, |name| {
+            name.strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(".json"))
+                .and_then(|rev| rev.parse::<u64>().ok())
+        })
+    }
+
+    /// Newest boot-snapshot feed (`feed-<appid>-<revision>.json`) under
+    /// /etc/regionlock, if any. Tolerant: junk filenames are ignored.
+    pub fn load_etc_snapshot(game: Game) -> Result<Option<SdrFeed>> {
+        load_etc_snapshot_in(Path::new(ETC_SNAPSHOT_DIR), game)
+    }
+
+    /// [`load_etc_snapshot`] against an explicit base directory (test seam,
+    /// like [`load_latest_in`]; never reads real /etc in tests).
+    pub fn load_etc_snapshot_in(dir: &Path, game: Game) -> Result<Option<SdrFeed>> {
+        load_newest_in(dir, |name| {
+            crate::ops::parse_feed_snapshot_filename(name)
+                .filter(|(appid, _)| *appid == game.appid())
+                .map(|(_, revision)| revision)
+        })
+    }
+
+    /// Offline resolution: user cache first, then the /etc snapshot. An
+    /// unavailable cache directory (no home at boot) falls through instead
+    /// of erroring; the snapshot exists precisely for that case.
+    pub fn load_offline(game: Game) -> Result<Option<SdrFeed>> {
+        match load_latest(game) {
+            Ok(Some(feed)) => return Ok(Some(feed)),
+            Ok(None) | Err(Error::CacheDirUnavailable { .. }) => {}
+            Err(e) => return Err(e),
+        }
+        load_etc_snapshot(game)
+    }
+
+    /// Newest feed in `dir` among files whose name `parse_revision`
+    /// recognizes; ties on revision cannot occur (one file per name).
+    fn load_newest_in(
+        dir: &Path,
+        parse_revision: impl Fn(&str) -> Option<u64>,
+    ) -> Result<Option<SdrFeed>> {
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -173,11 +225,7 @@ pub mod cache {
             }
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            let Some(revision) = name
-                .strip_prefix(&prefix)
-                .and_then(|rest| rest.strip_suffix(".json"))
-                .and_then(|rev| rev.parse::<u64>().ok())
-            else {
+            let Some(revision) = parse_revision(name) else {
                 continue;
             };
             if newest.as_ref().is_none_or(|(r, _)| revision > *r) {
@@ -201,7 +249,7 @@ pub mod cache {
 #[cfg(feature = "fetch")]
 pub fn acquire(game: Game, offline: bool) -> Result<SdrFeed> {
     if offline {
-        return cache::load_latest(game)?.ok_or(Error::NoCachedFeed { game });
+        return cache::load_offline(game)?.ok_or(Error::NoCachedFeed { game });
     }
     match fetch_body(game) {
         Ok(body) => {

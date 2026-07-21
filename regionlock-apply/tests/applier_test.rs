@@ -77,6 +77,24 @@ fn empty_stdin_is_refused_by_the_root_check_first() {
 }
 
 #[test]
+fn persist_operations_are_refused_unprivileged() {
+    let operations = [
+        Operation::EnablePersist {
+            ops_version: 1,
+            config_toml: "default_game = \"deadlock\"\n".to_string(),
+            feed_filename: "feed-1422450-42.json".to_string(),
+            feed_json: r#"{"revision":42,"pops":{}}"#.to_string(),
+        },
+        Operation::DisablePersist { ops_version: 1 },
+    ];
+    for operation in operations {
+        let input = serde_json::to_vec(&operation).expect("operation serializes");
+        let reason = refused_reason(&run_applier(&input));
+        assert!(reason.contains(ROOT_REASON), "reason was: {reason}");
+    }
+}
+
+#[test]
 fn unsupported_version_is_refused() {
     let input = serde_json::to_vec(&Operation::Inspect { ops_version: 99 })
         .expect("unsupported operation serializes");

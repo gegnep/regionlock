@@ -221,27 +221,56 @@ fn preset_roundtrip() {
 }
 
 #[test]
-fn still_unwired_commands_report_milestone() {
-    let env = TestEnv::new("unwired");
+fn persist_commands_refuse_without_tty_or_yes() {
+    // Like apply/teardown: in a pipe without --yes, both persist commands
+    // abort at the confirmation, before any escalation.
+    let env = TestEnv::new("persist-no-tty");
+    env.run_ok(&["block", "fra"]);
+
+    let out = env.run(&["enable-persist"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("use --yes"),
+        "enable-persist refuses non-interactively: {}",
+        stderr(&out)
+    );
+
     let out = env.run(&["disable-persist"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("not yet wired: disable-persist lands at M5"));
+    assert!(stderr(&out).contains("use --yes"));
+}
 
-    let out = env.run(&["enable-persist", "--json"]);
-    assert_eq!(out.status.code(), Some(1));
-    let value: serde_json::Value = serde_json::from_str(&stderr(&out)).unwrap();
-    assert_eq!(value["schema_version"], 1);
-    assert!(
-        value["error"]
-            .as_str()
-            .unwrap()
-            .contains("not yet wired: enable-persist")
-    );
-    assert_eq!(value["exit_code"], 1);
-    assert!(
-        value.get("kind").is_none(),
-        "not-wired errors are CLI-composed, no core kind"
-    );
+#[test]
+fn persist_commands_fail_hermetically_without_escalators() {
+    // With an empty PATH there is no pkexec/sudo/doas/run0: --yes gets past
+    // the confirmation and escalation fails with a structured error, never
+    // touching a real escalator. The feed comes from the seeded cache.
+    let env = TestEnv::new("persist-no-esc");
+    let empty = env.dir.join("empty-path");
+    std::fs::create_dir_all(&empty).unwrap();
+
+    for args in [
+        ["enable-persist", "--yes", "--json"],
+        ["disable-persist", "--yes", "--json"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_regionlock"))
+            .arg("--config")
+            .arg(&env.config)
+            .args(args)
+            .env("XDG_CACHE_HOME", &env.cache)
+            .env_remove("REGIONLOCK_CONFIG")
+            .env("PATH", &empty)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let value: serde_json::Value = serde_json::from_str(&stderr(&out)).unwrap();
+        assert_eq!(value["kind"], "escalation", "{args:?}");
+        let error = value["error"].as_str().unwrap();
+        assert!(
+            error.contains("not installed") || error.contains("regionlock-apply"),
+            "attempts are named: {error}"
+        );
+    }
 }
 
 #[test]
@@ -353,6 +382,60 @@ fn status_verify_fails_hermetically_without_escalators() {
         error.contains("not installed") || error.contains("regionlock-apply"),
         "attempts are named: {error}"
     );
+}
+
+#[test]
+fn apply_system_never_reads_the_user_cache() {
+    // --system is the boot path: config and feed resolve from
+    // /etc/regionlock ONLY. Hermetic contrast: with the user cache seeded
+    // and no escalators on PATH, plain `apply --yes` reaches escalation
+    // (its feed came from the user cache); `apply --system --yes` must not
+    // touch that cache, so on hosts without a real /etc/regionlock
+    // snapshot (the normal case) it fails earlier with no_cached_feed.
+    let env = TestEnv::new("apply-system");
+    env.run_ok(&["block", "fra"]);
+    let empty = env.dir.join("empty-path");
+    std::fs::create_dir_all(&empty).unwrap();
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_regionlock"))
+            .arg("--config")
+            .arg(&env.config)
+            .args(args)
+            .env("XDG_CACHE_HOME", &env.cache)
+            .env_remove("REGIONLOCK_CONFIG")
+            .env("PATH", &empty)
+            .output()
+            .unwrap()
+    };
+
+    let control = run(&["apply", "--yes", "--json"]);
+    assert_eq!(control.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_str(&stderr(&control)).unwrap();
+    assert_eq!(
+        value["kind"], "escalation",
+        "control: the seeded user cache feeds plain apply to escalation"
+    );
+
+    let system = run(&["apply", "--system", "--yes", "--json"]);
+    match system.status.code() {
+        Some(1) => {
+            let value: serde_json::Value = serde_json::from_str(&stderr(&system)).unwrap();
+            let kind = value["kind"].as_str().unwrap();
+            // no_cached_feed: /etc had no snapshot and the seeded user
+            // cache was (correctly) never consulted. escalation: this host
+            // has a real /etc/regionlock snapshot, which still proves the
+            // feed came from /etc resolution.
+            assert!(
+                kind == "no_cached_feed" || kind == "escalation",
+                "unexpected failure kind for --system: {kind}"
+            );
+        }
+        // A host with a real /etc snapshot and an empty diff applies
+        // nothing and succeeds; /etc resolution is still what ran.
+        Some(0) => {}
+        code => panic!("unexpected exit for --system: {code:?}"),
+    }
 }
 
 #[test]

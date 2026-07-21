@@ -12,8 +12,9 @@ use crate::error::Error;
 use crate::state::DesiredState;
 use crate::{Game, Result};
 
-/// Last resort in the resolution order (SPEC: XDG layout).
-const ETC_CONFIG_PATH: &str = "/etc/regionlock/config.toml";
+/// Last resort in the resolution order (SPEC: XDG layout), and the
+/// unconditional config path for `apply --system` (boot mode).
+pub const ETC_CONFIG_PATH: &str = "/etc/regionlock/config.toml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -121,7 +122,13 @@ impl Config {
         if let Some(explicit) = flag.or(env_value.as_deref()) {
             return Ok(explicit.to_path_buf());
         }
-        let xdg_path = Self::user_xdg_path()?;
+        // No determinable home directory: there is no user XDG candidate,
+        // so resolution continues at /etc. Defense only — the boot unit
+        // does not rely on this; it passes `apply --system`, which pins
+        // /etc/regionlock unconditionally.
+        let Ok(xdg_path) = Self::user_xdg_path() else {
+            return Ok(PathBuf::from(ETC_CONFIG_PATH));
+        };
         Ok(Self::resolve_path_with(
             flag,
             env_value.as_deref(),
@@ -188,6 +195,13 @@ impl Config {
         })
     }
 
+    /// Serialized TOML form with a stable field order. Shared by [`save`]
+    /// and the boot-snapshot builder (enable-persist), which sends the
+    /// bytes to the applier instead of writing them itself.
+    pub fn to_toml_string(&self) -> std::result::Result<String, toml::ser::Error> {
+        toml::to_string_pretty(self)
+    }
+
     /// Atomic write (tmp + rename) with a stable field order.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
@@ -196,7 +210,7 @@ impl Config {
                 source: e,
             })?;
         }
-        let serialized = toml::to_string_pretty(self).map_err(|e| Error::Config {
+        let serialized = self.to_toml_string().map_err(|e| Error::Config {
             path: path.to_path_buf(),
             reason: e.to_string(),
         })?;
