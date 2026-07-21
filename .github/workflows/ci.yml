@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # fmt and clippy run in the devShell; buildRustPackage's check phase
+      # runs the tests but not these lints.
+      - name: Format and lint
+        run: |
+          nix develop --command bash -c '
+            cargo fmt --check &&
+            cargo clippy --workspace --all-features --all-targets -- -D warnings
+          '
+
+      # Builds the package and runs the full test suite via doCheck.
+      - name: Build and test
+        run: nix flake check -L
