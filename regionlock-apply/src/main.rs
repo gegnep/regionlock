@@ -289,8 +289,12 @@ fn read_live_table() -> Result<Option<BTreeMap<String, Vec<Ipv4Addr>>>, String> 
     Ok(Some(live))
 }
 
+/// nft signals a missing table in a version-dependent way; match the known
+/// phrasings so teardown/inspect of an absent table stay idempotent rather
+/// than erroring on a wording change.
 fn is_missing_table(stderr: &str) -> bool {
-    stderr.contains("No such file or directory")
+    let s = stderr.to_ascii_lowercase();
+    s.contains("no such file or directory") || s.contains("does not exist")
 }
 
 fn nft(args: &[&str]) -> Result<String, String> {
