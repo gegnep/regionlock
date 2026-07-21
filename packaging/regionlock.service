@@ -1,0 +1,17 @@
+[Unit]
+Description=regionlock: apply firewall rules from the boot snapshot
+After=network-online.target nftables.service
+Wants=network-online.target
+# The snapshot in /etc/regionlock is self-contained; no user homedir needed.
+ConditionPathExists=/etc/regionlock/config.toml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Runs as root: no escalation inside the unit. --offline applies from the
+# pinned snapshot and never races the network at boot.
+ExecStart=regionlock apply --yes --offline
+ExecStop=regionlock teardown --yes
+
+[Install]
+WantedBy=multi-user.target

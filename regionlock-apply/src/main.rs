@@ -108,11 +108,20 @@ fn ensure_run_dir() -> Result<(), String> {
             if meta.uid() != 0 {
                 return Err(format!("{RUN_DIR} is not owned by root"));
             }
+            // Repair a group/world-writable dir (bad tmpfiles.d rule, etc.)
+            // before trusting files inside it, mirroring the lock file.
+            if meta.permissions().mode() & 0o022 != 0 {
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o755))
+                    .map_err(|e| format!("could not chmod {RUN_DIR}: {e}"))?;
+            }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(dir).map_err(|e| format!("could not create {RUN_DIR}: {e}"))?;
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o755))
-                .map_err(|e| format!("could not chmod {RUN_DIR}: {e}"))?;
+            // Set the mode atomically at creation so there is no
+            // world-writable window between create and chmod under a
+            // permissive umask.
+            std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o755)
+                .create(dir)
+                .map_err(|e| format!("could not create {RUN_DIR}: {e}"))?;
         }
         Err(e) => return Err(format!("could not stat {RUN_DIR}: {e}")),
     }
@@ -182,8 +191,13 @@ fn replace_ruleset(
 
     // Phase 1: pending intent record.
     write_file_0644(Path::new(AppliedState::PENDING_PATH), &journal_bytes)?;
-    // Phase 2: apply atomically via nft -f -.
-    run_nft_stdin(&ruleset)?;
+    // Phase 2: apply atomically via nft -f -. On failure remove the pending
+    // record: nothing crashed and the live table is untouched, so a later
+    // Inspect must not report a spurious reconciliation.
+    if let Err(e) = run_nft_stdin(&ruleset) {
+        let _ = fs::remove_file(AppliedState::PENDING_PATH);
+        return Err(e);
+    }
     // Phase 3: commit.
     fs::rename(AppliedState::PENDING_PATH, AppliedState::JOURNAL_PATH)
         .map_err(|e| format!("applied but could not commit journal: {e}"))?;
@@ -276,13 +290,20 @@ fn read_live_table() -> Result<Option<BTreeMap<String, Vec<Ipv4Addr>>>, String> 
         let Some(code) = name.strip_prefix("pop_") else {
             continue;
         };
-        let mut ips: Vec<Ipv4Addr> = set["elem"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.as_str())
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        // Hard-error on any element we cannot parse rather than dropping it:
+        // reconciliation compares against this map, so a silently-dropped IP
+        // could make a genuinely-matching pending look mismatched and get
+        // discarded, leaving the journal stale.
+        let mut ips: Vec<Ipv4Addr> = Vec::new();
+        for elem in set["elem"].as_array().into_iter().flatten() {
+            let s = elem
+                .as_str()
+                .ok_or_else(|| format!("nft -j: non-string element in set {name}"))?;
+            let ip = s
+                .parse()
+                .map_err(|_| format!("nft -j: unparseable IPv4 {s:?} in set {name}"))?;
+            ips.push(ip);
+        }
         ips.sort();
         live.insert(code.to_string(), ips);
     }
@@ -340,7 +361,18 @@ fn run_nft_stdin(ruleset: &str) -> Result<(), String> {
 
 /// 0644 atomic write within /run/regionlock (tmp + rename, O_NOFOLLOW).
 fn write_file_0644(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = PathBuf::from(format!("{}.tmp.{}", path.display(), std::process::id()));
+    // pid + counter, not pid alone: a stale tmp left by a crashed run whose
+    // pid is later reused would otherwise make create_new fail (EEXIST) and
+    // abort a legitimate apply.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = PathBuf::from(format!(
+        "{}.tmp.{}.{seq}",
+        path.display(),
+        std::process::id()
+    ));
+    // Defensively clear a stale tmp at this exact name before create_new.
+    let _ = fs::remove_file(&tmp);
     {
         let mut file = fs::OpenOptions::new()
             .create_new(true)

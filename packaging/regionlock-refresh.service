@@ -1,0 +1,9 @@
+[Unit]
+Description=regionlock: refresh the pinned SDR feed snapshot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Refreshes /etc/regionlock's pinned feed data, then re-applies from it.
+ExecStart=regionlock enable-persist --yes --refresh
