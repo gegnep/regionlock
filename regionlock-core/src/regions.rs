@@ -87,10 +87,93 @@ pub enum Classification {
 }
 
 /// Static classification for every known POP code across all three games.
-/// M1b fills this from the fixtures; the completeness test walks all three
-/// fixture files and fails on any code missing here.
+/// The completeness test walks all three fixture files and fails on any
+/// code missing here.
+///
+/// Sub-region split rules:
+/// - nae/naw split at the 100th meridian west (lon -100.0). Central POPs
+///   east of it count as nae. Borderline entries carry a comment.
+/// - euw/eue split at 15°E. Borderline entries carry a comment.
+/// - apac always accompanies asia/oce/india/jp/kr (superset invariant).
+/// - India POPs are india, not asia. China partner POPs are asia.
 pub const CLASSIFICATION: &[(&str, &[Region])] = &[
-    // M1b: ("fra", &[Region::Eu, Region::Euw]), ... every fixture POP code.
+    ("ams", &[Region::Eu, Region::Euw]),
+    ("ams4", &[Region::Eu, Region::Euw]),
+    ("atl", &[Region::Na, Region::Nae]),
+    ("bom2", &[Region::Apac, Region::India]),
+    ("ctu", &[Region::Asia, Region::Apac]),
+    ("ctum", &[Region::Asia, Region::Apac]),
+    ("ctut", &[Region::Asia, Region::Apac]),
+    ("ctuu", &[Region::Asia, Region::Apac]),
+    ("dfw", &[Region::Na, Region::Nae]), // borderline: lon -96.8, central TX east of -100
+    ("dfwm", &[Region::Na, Region::Nae]), // borderline: same site as dfw
+    ("dxb", &[Region::Me]),
+    ("eat", &[Region::Na, Region::Naw]),
+    ("eze", &[Region::Sa]),
+    ("fra", &[Region::Eu, Region::Euw]),
+    ("fsn", &[Region::Eu, Region::Euw]), // borderline: lon 12.4 (Saxony) stays west of 15E
+    ("gru", &[Region::Sa]),
+    ("gum", &[Region::Apac, Region::Oce]), // Guam: Micronesia, grouped with Oceania
+    ("hel", &[Region::Eu, Region::Eue]),
+    ("hkg", &[Region::Asia, Region::Apac]),
+    ("hkg4", &[Region::Asia, Region::Apac]),
+    ("iad", &[Region::Na, Region::Nae]),
+    ("jnb", &[Region::Af]),
+    ("lax", &[Region::Na, Region::Naw]),
+    ("lhr", &[Region::Eu, Region::Euw]),
+    ("lim", &[Region::Sa]),
+    ("maa2", &[Region::Apac, Region::India]),
+    ("mad", &[Region::Eu, Region::Euw]),
+    ("mam1", &[Region::Eu, Region::Euw]),
+    ("mas1", &[Region::Na, Region::Nae]),
+    ("mat1", &[Region::Na, Region::Nae]),
+    ("mch1", &[Region::Na, Region::Nae]),
+    ("mdb1", &[Region::Me]),
+    ("mdc1", &[Region::Na, Region::Nae]),
+    ("mdf1", &[Region::Na, Region::Nae]), // borderline: lon -96.8, central TX east of -100
+    ("mfr1", &[Region::Eu, Region::Euw]),
+    ("mhk1", &[Region::Asia, Region::Apac]),
+    ("mla1", &[Region::Na, Region::Naw]),
+    ("mln1", &[Region::Eu, Region::Euw]),
+    ("mlx1", &[Region::Eu, Region::Euw]),
+    ("mmi1", &[Region::Na, Region::Nae]),
+    ("mmo1", &[Region::Na, Region::Nae]),
+    ("mny1", &[Region::Na, Region::Nae]),
+    ("mpx1", &[Region::Na, Region::Naw]),
+    ("msa1", &[Region::Na, Region::Naw]),
+    ("msg1", &[Region::Asia, Region::Apac]),
+    ("msj1", &[Region::Na, Region::Naw]),
+    ("msl1", &[Region::Na, Region::Nae]), // borderline: lon -90.2, central MO east of -100
+    ("msp1", &[Region::Sa]),
+    ("mst1", &[Region::Eu, Region::Euw]),
+    ("msy1", &[Region::Apac, Region::Oce]),
+    ("mto1", &[Region::Na, Region::Nae]),
+    ("mtp1", &[Region::Asia, Region::Apac]),
+    ("mty1", &[Region::Asia, Region::Apac, Region::Jp]),
+    ("ord", &[Region::Na, Region::Nae]),
+    ("par", &[Region::Eu, Region::Euw]),
+    ("pek", &[Region::Asia, Region::Apac]),
+    ("pekm", &[Region::Asia, Region::Apac]),
+    ("pekt", &[Region::Asia, Region::Apac]),
+    ("peku", &[Region::Asia, Region::Apac]),
+    ("pvg", &[Region::Asia, Region::Apac]),
+    ("pvgm", &[Region::Asia, Region::Apac]),
+    ("pvgt", &[Region::Asia, Region::Apac]),
+    ("pvgu", &[Region::Asia, Region::Apac]),
+    ("scl", &[Region::Sa]),
+    ("sea", &[Region::Na, Region::Naw]),
+    ("seo", &[Region::Asia, Region::Apac, Region::Kr]),
+    ("sgp", &[Region::Asia, Region::Apac]),
+    ("sto", &[Region::Eu, Region::Eue]), // borderline: lon 17.9, grouped east with waw/hel
+    ("sto2", &[Region::Eu, Region::Eue]), // borderline: same site as sto
+    ("syd", &[Region::Apac, Region::Oce]),
+    ("tgd", &[Region::Asia, Region::Apac]),
+    ("tgdm", &[Region::Asia, Region::Apac]),
+    ("tgdt", &[Region::Asia, Region::Apac]),
+    ("tgdu", &[Region::Asia, Region::Apac]),
+    ("tyo", &[Region::Asia, Region::Apac, Region::Jp]),
+    ("vie", &[Region::Eu, Region::Eue]), // borderline: lon 16.2, just east of 15E
+    ("waw", &[Region::Eu, Region::Eue]),
 ];
 
 pub fn classify(pop_code: &str) -> Classification {
@@ -113,14 +196,39 @@ pub enum Selector {
 /// Region aliases win over (hypothetical) same-named POPs; unknown input
 /// is [`crate::Error::UnknownSelector`].
 pub fn parse_selector(input: &str, known_pops: &[&str]) -> crate::Result<Selector> {
-    let _ = (input, known_pops);
-    todo!("M1b")
+    if let Ok(region) = input.parse::<Region>() {
+        return Ok(Selector::Region(region));
+    }
+    if known_pops.contains(&input) {
+        return Ok(Selector::Pop(input.to_string()));
+    }
+    Err(crate::Error::UnknownSelector {
+        selector: input.to_string(),
+    })
 }
 
 /// Expand a selector to blockable POP codes for the active feed.
 /// Regions expand through [`classify`]; relay-less and unclassified POPs are
 /// never included.
 pub fn expand(selector: &Selector, feed: &crate::feed::SdrFeed) -> Vec<String> {
-    let _ = (selector, feed);
-    todo!("M1b")
+    let mut out = Vec::new();
+    match selector {
+        Selector::Pop(code) => {
+            if feed.blockable_pops().any(|(c, _)| c == code) {
+                out.push(code.clone());
+            }
+        }
+        Selector::Region(region) => {
+            for (code, _) in feed.blockable_pops() {
+                if let Classification::Regions(regions) = classify(code)
+                    && regions.contains(region)
+                {
+                    out.push(code.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
