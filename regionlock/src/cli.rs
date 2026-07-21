@@ -139,6 +139,24 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Packaging helpers: emit shell completions or the man page. Hidden
+    /// from --help; packaging invokes this at package-build time.
+    #[command(hide = true)]
+    Generate {
+        #[command(subcommand)]
+        what: GenerateCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GenerateCommand {
+    /// Write the completion script for the given shell to stdout.
+    Completions {
+        /// One of: bash, zsh, fish, nu.
+        shell: String,
+    },
+    /// Write the roff man page for the top-level command to stdout.
+    Man,
 }
 
 #[derive(Debug, Subcommand)]

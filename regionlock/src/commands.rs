@@ -5,6 +5,9 @@
 
 use std::path::PathBuf;
 
+use clap::CommandFactory;
+use clap_complete::{Shell, generate as write_completions};
+use clap_complete_nushell::Nushell;
 use regionlock_core::config::{ApplyMode, Config};
 use regionlock_core::feed::{self, Pop, SdrFeed};
 use regionlock_core::payload::{DeltaPayload, ListPayload, PopInfo, RegionInfo, RegionsPayload};
@@ -13,7 +16,7 @@ use regionlock_core::state::{Delta, DesiredState};
 use regionlock_core::{Error, Game, SCHEMA_VERSION};
 use serde_json::json;
 
-use crate::cli::{Cli, Command, PresetCommand};
+use crate::cli::{Cli, Command, GenerateCommand, PresetCommand};
 use crate::output::{Cell, Style, render_table};
 
 /// A command failure. Core errors own their exit code and JSON kind.
@@ -24,6 +27,11 @@ pub enum Failure {
     NotWired {
         what: &'static str,
         milestone: &'static str,
+    },
+    /// Packaging-facing `generate` failure: plain stderr, exit 1. No JSON
+    /// shape; the hidden command carries no --json flag.
+    Usage {
+        message: String,
     },
 }
 
@@ -70,6 +78,10 @@ impl Failure {
                 }
                 1
             }
+            Failure::Usage { message } => {
+                eprintln!("{message}");
+                1
+            }
         }
     }
 }
@@ -92,6 +104,7 @@ pub fn json_requested(command: &Command) -> bool {
         | Command::DisablePersist { json, .. } => *json,
         Command::Preset(PresetCommand::List { json }) => *json,
         Command::Preset(_) => false,
+        Command::Generate { .. } => false,
     }
 }
 
@@ -107,7 +120,9 @@ struct Ctx {
 
 pub fn run(cli: &Cli) -> Result<(), Failure> {
     // Not-yet-wired commands answer before any config or feed plumbing.
+    // generate renders from the grammar alone: no config, cache, or network.
     match &cli.command {
+        Command::Generate { what } => return cmd_generate(what),
         Command::Teardown { .. } => return Err(Failure::not_wired("teardown", "M2-M3")),
         Command::Plan { .. } => return Err(Failure::not_wired("plan", "M2-M3")),
         Command::Apply { .. } => return Err(Failure::not_wired("apply", "M2-M3")),
@@ -161,7 +176,40 @@ pub fn run(cli: &Cli) -> Result<(), Failure> {
         | Command::Status { .. }
         | Command::Ping { .. }
         | Command::EnablePersist { .. }
-        | Command::DisablePersist { .. } => unreachable!("not-yet-wired commands return early"),
+        | Command::DisablePersist { .. }
+        | Command::Generate { .. } => unreachable!("early-return commands return above"),
+    }
+}
+
+/// Hidden packaging command: completions and the man page render from the
+/// live grammar, so packaging output never drifts from cli.rs.
+fn cmd_generate(what: &GenerateCommand) -> Result<(), Failure> {
+    let mut cmd = Cli::command();
+    // Locked handle: completions/man are one large write; skip per-line
+    // stdout lock churn.
+    let mut stdout = std::io::stdout().lock();
+    match what {
+        GenerateCommand::Completions { shell } => {
+            match shell.as_str() {
+                "bash" => write_completions(Shell::Bash, &mut cmd, "regionlock", &mut stdout),
+                "zsh" => write_completions(Shell::Zsh, &mut cmd, "regionlock", &mut stdout),
+                "fish" => write_completions(Shell::Fish, &mut cmd, "regionlock", &mut stdout),
+                "nu" => write_completions(Nushell, &mut cmd, "regionlock", &mut stdout),
+                other => {
+                    return Err(Failure::Usage {
+                        message: format!(
+                            "unknown shell {other:?}; supported shells: bash, zsh, fish, nu"
+                        ),
+                    });
+                }
+            }
+            Ok(())
+        }
+        GenerateCommand::Man => clap_mangen::Man::new(cmd)
+            .render(&mut stdout)
+            .map_err(|err| Failure::Usage {
+                message: format!("failed to render man page: {err}"),
+            }),
     }
 }
 
