@@ -1,5 +1,7 @@
 # regionlock
 
+[![CI](https://github.com/gegnep/regionlock/actions/workflows/ci.yml/badge.svg)](https://github.com/gegnep/regionlock/actions/workflows/ci.yml)
+
 > **Disclaimer:** A variety of LLMs assisted in building this project. I
 > oversaw and made all major design and implementation decisions.
 
