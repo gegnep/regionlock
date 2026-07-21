@@ -28,8 +28,11 @@ pub const MAX_IPS_PER_POP: usize = 64;
 pub const MAX_POP_CODE_LEN: usize = 16;
 
 /// One privileged request. Serialized as JSON with an `op` tag.
+/// deny_unknown_fields: the boundary rejects payloads carrying anything
+/// beyond the schema (e.g. a smuggled "ruleset" or "table" key), instead
+/// of silently ignoring it. Tolerant parsing is for the SDR feed, not here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     /// Replace the entire `table inet regionlock` with the spec's contents
     /// and journal the result. The applier renders the ruleset itself.
