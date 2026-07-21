@@ -10,6 +10,22 @@
       pkgs = nixpkgs.legacyPackages.${system};
     in
     {
+      packages.${system} = {
+        regionlock = pkgs.callPackage ./nix/package.nix { };
+        default = self.packages.${system}.regionlock;
+      };
+
+      # Consume as a flake input:
+      #   imports = [ inputs.regionlock.nixosModules.regionlock ];
+      # The module closes over `self` for its default package (no overlay
+      # needed). `overlays.default` is offered for those who prefer
+      # `pkgs.regionlock`.
+      nixosModules.regionlock = import ./nix/module.nix self;
+
+      overlays.default = _final: prev: {
+        regionlock = prev.callPackage ./nix/package.nix { };
+      };
+
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
           # toolchain
@@ -31,8 +47,5 @@
         # rust-analyzer needs the std sources from nixpkgs rustc.
         env.RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
       };
-
-      # M6 adds packages.${system}.regionlock and nixosModules.regionlock here.
-      # The nixos flake consumes those; this repo never installs system files.
     };
 }

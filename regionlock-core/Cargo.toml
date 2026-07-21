@@ -18,4 +18,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 etcetera.workspace = true
+# geteuid for the "already root" direct-exec path in escalate.rs.
+libc.workspace = true
 ureq = { workspace = true, optional = true }

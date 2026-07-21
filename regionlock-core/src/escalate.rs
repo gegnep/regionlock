@@ -58,6 +58,17 @@ pub fn run_applier(preference: Escalator, operation: &Operation) -> Result<Reply
         reason: e.to_string(),
     })?;
 
+    // Already root (a systemd boot unit runs the CLI as root): run the
+    // applier directly. An escalator like pkexec needs an auth agent that
+    // does not exist at boot; SPEC: "runs as root, no escalation inside the
+    // unit". SAFETY: geteuid has no preconditions and touches no memory.
+    if unsafe { libc::geteuid() } == 0 {
+        return drive(Command::new(&applier), &payload).map_err(|reason| Error::Escalation {
+            attempted: "direct exec (already root)".into(),
+            reason,
+        });
+    }
+
     let mut attempts: Vec<String> = Vec::new();
     for backend in backends(preference) {
         if find_in_path(backend).is_none() {
@@ -104,8 +115,16 @@ fn run_via(
     applier: &std::path::Path,
     payload: &str,
 ) -> std::result::Result<Reply, String> {
-    let mut child = Command::new(backend)
-        .arg(applier)
+    let mut cmd = Command::new(backend);
+    cmd.arg(applier);
+    drive(cmd, payload)
+}
+
+/// Send the operation on the child's stdin and read its single JSON reply
+/// from stdout. Shared by the escalated path (backend + applier) and the
+/// direct-root path (applier alone).
+fn drive(mut cmd: Command, payload: &str) -> std::result::Result<Reply, String> {
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit()) // auth prompts (sudo/doas) talk to the tty
