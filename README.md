@@ -1,5 +1,8 @@
 # regionlock
 
+> **Disclaimer:** A variety of LLMs assisted in building this project. I
+> oversaw and made all major design and implementation decisions.
+
 Linux CLI that biases Steam Datagram Relay (SDR) matchmaking away from
 chosen relay regions. Deadlock is the primary target. CS2 and Dota 2 use the
 same mechanism. regionlock blocks Valve relay POPs at the firewall, so
