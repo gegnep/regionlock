@@ -29,11 +29,16 @@ pub trait FirewallBackend {
 ///     ...one set per POP, feed order (BTreeMap iteration)...
 ///     chain out {
 ///         type filter hook output priority filter; policy accept;
-///         udp daddr @pop_<code> drop
+///         ip daddr @pop_<code> meta l4proto udp drop
 ///         ...one rule per POP, same order...
 ///     }
 /// }
 /// ```
+///
+/// The match is `ip daddr @set meta l4proto udp`: `daddr` is an IPv4-header
+/// field, not a UDP field, so `udp daddr` is invalid nft syntax. `ip daddr`
+/// selects the destination address from the ipv4_addr set and
+/// `meta l4proto udp` restricts to UDP.
 ///
 /// The leading `table` + `delete table` pair makes the script idempotent
 /// under `nft -f -` whether or not the table exists (nft cannot delete a
@@ -68,7 +73,9 @@ impl FirewallBackend for NftBackend {
             "    chain out {\n        type filter hook output priority filter; policy accept;\n",
         );
         for code in spec.pops.keys() {
-            ruleset.push_str(&format!("        udp daddr @pop_{code} drop\n"));
+            ruleset.push_str(&format!(
+                "        ip daddr @pop_{code} meta l4proto udp drop\n"
+            ));
         }
         ruleset.push_str("    }\n}\n");
         ruleset

@@ -319,7 +319,7 @@ fn plan_json_reports_diff_and_ruleset() {
         value["ruleset"]
             .as_str()
             .unwrap()
-            .contains("udp daddr @pop_fra drop")
+            .contains("ip daddr @pop_fra meta l4proto udp drop")
     );
 }
 
@@ -339,7 +339,7 @@ fn plan_human_output_contains_rendered_ruleset() {
         "ruleset is rendered: {text}"
     );
     assert!(
-        text.contains("udp daddr @pop_fra drop"),
+        text.contains("ip daddr @pop_fra meta l4proto udp drop"),
         "fra rule is rendered: {text}"
     );
 }

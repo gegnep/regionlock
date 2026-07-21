@@ -27,11 +27,20 @@ fn compare_golden(name: &str, rendered: &str) {
     validate_with_nft_when_enabled(name, rendered);
 }
 
+/// Validate the rendered ruleset with `nft --check` wherever nft can run.
+///
+/// By default this runs automatically and only skips when nft is genuinely
+/// unable to validate: absent from PATH, or unable to init its netlink cache
+/// (the unprivileged dev sandbox). Skips print a visible note. Set
+/// REGIONLOCK_NFT_CHECK=1 for strict mode, which turns those skips into hard
+/// failures — use it in any environment where nft is expected to work (a real
+/// host, the privileged e2e), so an invalid ruleset can never pass silently.
+///
+/// The earlier opt-in gate let invalid nft syntax (`udp daddr ...`) pass the
+/// byte-golden tests because nobody set the env var; running by default
+/// closes that gap.
 fn validate_with_nft_when_enabled(name: &str, rendered: &str) {
-    if std::env::var("REGIONLOCK_NFT_CHECK").ok().as_deref() != Some("1") {
-        eprintln!("nft --check skipped (set REGIONLOCK_NFT_CHECK=1)");
-        return;
-    }
+    let strict = std::env::var("REGIONLOCK_NFT_CHECK").ok().as_deref() == Some("1");
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
@@ -40,18 +49,32 @@ fn validate_with_nft_when_enabled(name: &str, rendered: &str) {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     fs::write(&path, rendered).expect("write nft validation input");
-    let output = Command::new("nft")
+    let result = Command::new("nft")
         .arg("--check")
         .arg("-f")
         .arg(&path)
-        .output()
-        .expect("nft must be available when REGIONLOCK_NFT_CHECK=1");
+        .output();
     let _ = fs::remove_file(&path);
-    assert!(
-        output.status.success(),
-        "nft --check failed for {name}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+
+    let output = match result {
+        Ok(output) => output,
+        Err(e) => {
+            let msg = format!("nft --check skipped for {name}: nft not runnable ({e})");
+            assert!(!strict, "{msg}");
+            eprintln!("{msg}");
+            return;
+        }
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        // netlink cache init needs privileges/namespaces; that is an
+        // environment limit, not a ruleset error, so skip unless strict.
+        if !strict && stderr.contains("cache initialization failed") {
+            eprintln!("nft --check skipped for {name}: netlink unavailable in this environment");
+            return;
+        }
+        panic!("nft --check failed for {name}: {stderr}");
+    }
 }
 
 #[test]

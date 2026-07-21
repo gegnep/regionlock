@@ -7,6 +7,6 @@ table inet regionlock {
     }
     chain out {
         type filter hook output priority filter; policy accept;
-        udp daddr @pop_fra drop
+        ip daddr @pop_fra meta l4proto udp drop
     }
 }

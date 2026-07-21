@@ -15,8 +15,8 @@ table inet regionlock {
     }
     chain out {
         type filter hook output priority filter; policy accept;
-        udp daddr @pop_ams drop
-        udp daddr @pop_atl drop
-        udp daddr @pop_dfw drop
+        ip daddr @pop_ams meta l4proto udp drop
+        ip daddr @pop_atl meta l4proto udp drop
+        ip daddr @pop_dfw meta l4proto udp drop
     }
 }
