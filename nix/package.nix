@@ -62,10 +62,14 @@ rustPlatform.buildRustPackage {
     $out/bin/regionlock generate man > regionlock.1
     installManPage regionlock.1
 
-    # polkit action for the applier (picked up when the package is in
-    # environment.systemPackages with security.polkit enabled).
+    # polkit action for the applier. Rewrite the exec.path from the distro
+    # default (/usr/bin) to this build's actual applier path, so pkexec
+    # matches OUR action (custom message, auth_admin_keep caching) instead
+    # of falling back to the generic org.freedesktop.policykit.exec action.
     install -Dm644 packaging/org.pengeg.regionlock.policy \
       $out/share/polkit-1/actions/org.pengeg.regionlock.policy
+    substituteInPlace $out/share/polkit-1/actions/org.pengeg.regionlock.policy \
+      --replace-fail /usr/bin/regionlock-apply $out/bin/regionlock-apply
 
     # Static systemd unit files, for non-NixOS packaging / reference. On
     # NixOS the module defines the units itself (store path -> the applier

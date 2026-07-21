@@ -62,9 +62,14 @@ in
 
     environment.systemPackages = [ cfg.package ];
 
-    # The packaged polkit action ships under share/polkit-1/actions and is
-    # picked up because the package is a system package.
     security.polkit.enable = true;
+
+    # Install the packaged polkit action (its exec.path already rewritten to
+    # this package's applier) where polkit reads unconditionally. Without
+    # this the exec.path would not match the store binary and pkexec would
+    # fall back to the generic action: no custom message, no auth caching.
+    environment.etc."polkit-1/actions/org.pengeg.regionlock.policy".source =
+      "${cfg.package}/share/polkit-1/actions/org.pengeg.regionlock.policy";
 
     environment.etc."regionlock/config.toml" = lib.mkIf (cfg.settings != { }) {
       source = tomlFormat.generate "regionlock-config.toml" cfg.settings;
