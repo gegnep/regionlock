@@ -1,2 +1,13 @@
 /target
 /.direnv
+/result
+/result-*
+
+# LLM / harness artifacts — never commit
+/.claude/
+/CLAUDE.md
+/AGENTS.md
+/.opencode/
+/opencode.json
+/.aider*
+

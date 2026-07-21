@@ -1,29 +1,29 @@
 # regionlock
 
 Linux CLI that biases Steam Datagram Relay (SDR) matchmaking away from
-chosen relay regions. Deadlock is the primary target; CS2 and Dota 2 work
-through the same mechanism. regionlock blocks Valve relay POPs at the
-firewall so matchmaking skips them.
+chosen relay regions. Deadlock is the primary target. CS2 and Dota 2 use the
+same mechanism. regionlock blocks Valve relay POPs at the firewall, so
+matchmaking skips them.
 
 ## Honest limitation
 
 Blocking relays *biases* SDR routing. It does not guarantee it. SDR can
-re-route through relays you did not block, and the actual game servers are
-not in the SDR feed. Treat regionlock as a strong nudge, not a hard region
+re-route through relays you did not block. The game servers are not in the
+SDR feed either. Treat regionlock as a strong nudge. It is not a hard region
 lock.
 
-## How it works
+## Mechanism
 
-Valve publishes SDR topology per game. regionlock fetches it, resolves the
-POPs you want blocked (by code or region alias), and generates an nftables
-ruleset that drops outbound UDP to those relay IPs. It blocks all UDP to a
-relay IP and ignores ports: relays are dedicated Valve boxes, so this avoids
-per-range rule complexity.
+Valve publishes SDR topology per game. regionlock fetches it. It resolves the
+POPs you want blocked, by code or region alias. It then generates an nftables
+ruleset that drops outbound UDP to those relay IPs. The rule blocks all UDP
+to a relay IP and ignores ports. Relays are dedicated Valve boxes, so this
+avoids per-range rule complexity.
 
 ## Model
 
 Mutations edit desired state and never need privileges. `apply` reconciles
-that state into the firewall and escalates once, at that moment only.
+that state into the firewall. It escalates once, only at that moment.
 
 ```
 regionlock block eu fra        # edit desired state
@@ -36,35 +36,90 @@ regionlock teardown            # remove the firewall table (leaves state)
 - `list [--ping]` shows POPs, regions, and latency (measured or estimated).
 - `block` / `unblock` / `allow` / `reset` edit per-game desired state.
 - `preset save|load|list|rm` stores per-game blocklists.
-- `game [deadlock|cs2|dota2]` sets the default game; `--game` overrides once.
+- `game [deadlock|cs2|dota2]` sets the default game. `--game` overrides once.
+- `ping` probes relay latency live. `--json` emits NDJSON as results arrive.
+- `enable-persist` / `disable-persist` manage boot-time persistence.
 - Every read command takes `--json`. See [docs/json-api.md](docs/json-api.md).
 
-## Privilege model
+## Install
 
-Only `regionlock-apply` runs as root. It reads a typed operation from stdin,
-validates it, and touches nothing except `table inet regionlock`. It cannot
-be handed raw nftables text; it builds the ruleset itself. Escalation uses
-pkexec, sudo, doas, or run0 (auto-detected, configurable).
+### Flake input (NixOS)
+
+Add regionlock to your system flake. Import the module.
+
+```nix
+{
+  inputs.regionlock = {
+    url = "github:gegnep/regionlock";        # or git+file:///path for local dev
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  # in your NixOS configuration:
+  imports = [ inputs.regionlock.nixosModules.regionlock ];
+
+  programs.regionlock = {
+    enable = true;
+    # Optional: apply a blocklist at boot from a declarative config.
+    persist = true;
+    settings = {
+      default_game = "deadlock";
+      games.deadlock.desired = [ "fra" "ams" "waw" ];
+    };
+  };
+}
+```
+
+The module installs the CLI and the polkit action. The polkit action makes
+pkexec show a regionlock-specific prompt and cache the authorization for a
+session. When `persist` is set, the module also defines a store-managed boot
+service. The applier recognizes that service as module-managed and skips
+`systemctl` itself.
+
+Prefer `inputs.nixpkgs.follows = "nixpkgs"`. The applier's runtime deps
+(nftables, systemd) then match your system. This needs a nixpkgs with rustc
+1.85 or newer, for edition 2024.
+
+`overlays.default` exposes `pkgs.regionlock` if you would rather not use the
+module.
+
+### Standalone build
+
+```
+nix build github:gegnep/regionlock#regionlock   # or cargo build --release
+```
 
 ## Configuration
 
-`~/.config/regionlock/config.toml` holds the default game, per-game desired
-state, presets, apply mode, and escalator preference. Desired state lives in
-config on purpose: declarative, dotfile-able, and ready for a home-manager
-module.
+`~/.config/regionlock/config.toml` holds user intent: the default game,
+per-game desired state, presets, apply mode, escalator preference, and
+`home_pop` for latency estimates. Desired state lives in config on purpose.
+This keeps it declarative and dotfile-able. It is also the source for the
+NixOS module's `settings`. Config resolution order: `--config`,
+`$REGIONLOCK_CONFIG`, `~/.config/regionlock`, then `/etc/regionlock`.
+
+## Privilege model
+
+Only `regionlock-apply` runs as root. It reads a typed operation from stdin.
+It validates the operation. It touches nothing except `table inet
+regionlock`. It never accepts raw nftables text. It builds the ruleset
+itself. Escalation uses pkexec, sudo, doas, or run0, auto-detected and
+configurable. A boot service already runs as root, so it invokes the applier
+directly without an escalator.
 
 ## Requirements
 
 - Linux with nftables.
-- `ping` (iputils) for live latency; without it, regionlock shows feed
-  estimates labeled as estimates.
+- `ping` (iputils) for live latency. Without it, regionlock shows feed
+  estimates and labels them as estimates.
 
 ## Scope
 
 v1 is a Linux CLI. A TUI, an iptables backend, IPv6, and Windows/macOS are
-out of scope. The core library is UI-free so a future TUI reuses it whole.
+out of scope. The core library carries no UI dependencies, so a future TUI
+reuses it whole. The original design SPEC lived in `docs/SPEC.md`. Git
+history preserves it now that v1 is done.
 
 ## License
 
-GPL-3.0-only. Prior art is GPL; regionlock uses mechanism knowledge only and
+GPL-3.0-only. Prior art is GPL. regionlock uses mechanism knowledge only and
 copies no code from it.
