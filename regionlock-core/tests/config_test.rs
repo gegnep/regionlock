@@ -162,8 +162,9 @@ fn resolve_path_with_precedence() {
         etc_path
     );
 
-    // Nothing exists: falls back to the xdg path as a write target, even
-    // though it does not exist yet.
+    // Explicit overrides win even when the file does not exist yet: a first
+    // run with --config (or $REGIONLOCK_CONFIG) must write there, never
+    // fall through to XDG.
     let missing_flag = dir.join("no-such-flag.toml");
     let missing_env = dir.join("no-such-env.toml");
     let missing_etc = dir.join("no-such-etc.toml");
@@ -171,11 +172,17 @@ fn resolve_path_with_precedence() {
         Config::resolve_path_with(
             Some(&missing_flag),
             Some(&missing_env),
-            &missing_xdg,
-            &missing_etc
+            &xdg_path,
+            &etc_path
         ),
-        missing_xdg
+        missing_flag
     );
+    assert_eq!(
+        Config::resolve_path_with(None, Some(&missing_env), &xdg_path, &etc_path),
+        missing_env
+    );
+
+    // No overrides and nothing exists: the xdg path is the write target.
     assert_eq!(
         Config::resolve_path_with(None, None, &missing_xdg, &missing_etc),
         missing_xdg

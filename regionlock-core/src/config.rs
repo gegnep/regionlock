@@ -111,12 +111,11 @@ impl Config {
     /// when none do.
     pub fn resolve_path(flag: Option<&Path>) -> Result<PathBuf> {
         let env_value = std::env::var_os("REGIONLOCK_CONFIG").map(PathBuf::from);
-        // Flag and env are honored before XDG discovery runs, so a failed
-        // home-directory lookup cannot defeat an explicit override.
-        for candidate in [flag, env_value.as_deref()].into_iter().flatten() {
-            if candidate.exists() {
-                return Ok(candidate.to_path_buf());
-            }
+        // Explicit overrides win unconditionally, existing or not: a first
+        // run with --config must write there, not fall through to XDG. This
+        // also keeps XDG discovery failure from defeating an override.
+        if let Some(explicit) = flag.or(env_value.as_deref()) {
+            return Ok(explicit.to_path_buf());
         }
         let xdg_path = Self::user_xdg_path()?;
         Ok(Self::resolve_path_with(
@@ -142,18 +141,22 @@ impl Config {
     /// `xdg_path` directly instead of mutating process env (unsafe on
     /// edition 2024) or the real home directory.
     ///
-    /// Precedence: `flag` > `env_value` > `xdg_path` > `etc_path`
-    /// (production passes `/etc/regionlock/config.toml`; tests inject their
-    /// own so results never depend on host state). Returns the first path
-    /// that exists; when none do, returns `xdg_path` (the write target).
+    /// Precedence: `flag` and `env_value` are explicit overrides and win
+    /// unconditionally (existing or not — a first run must write to them).
+    /// Otherwise `xdg_path` wins when it exists, then `etc_path` when it
+    /// exists (production passes `/etc/regionlock/config.toml`; tests inject
+    /// their own so results never depend on host state), else `xdg_path` as
+    /// the write target.
     pub fn resolve_path_with(
         flag: Option<&Path>,
         env_value: Option<&Path>,
         xdg_path: &Path,
         etc_path: &Path,
     ) -> PathBuf {
-        let candidates = [flag, env_value, Some(xdg_path), Some(etc_path)];
-        for candidate in candidates.into_iter().flatten() {
+        if let Some(explicit) = flag.or(env_value) {
+            return explicit.to_path_buf();
+        }
+        for candidate in [xdg_path, etc_path] {
             if candidate.exists() {
                 return candidate.to_path_buf();
             }

@@ -33,9 +33,8 @@ impl TestEnv {
         let cache = dir.join("cache");
         let feed_dir = cache.join("regionlock");
         std::fs::create_dir_all(&feed_dir).unwrap();
-        // The config file must exist: resolve_path falls through to the
-        // real XDG config path for missing candidates (frozen core behavior).
-        std::fs::write(&config, "").unwrap();
+        // No config pre-touch: an explicit --config path is honored as the
+        // write target even before the file exists (first-run behavior).
         std::fs::copy(FIXTURE, feed_dir.join(format!("1422450-{REVISION}.json"))).unwrap();
         TestEnv { dir, config, cache }
     }
