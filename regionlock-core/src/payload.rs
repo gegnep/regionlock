@@ -69,6 +69,28 @@ pub struct DeltaPayload {
     pub staged: bool,
 }
 
+/// `plan --json`: structured diff plus the rendered ruleset (SPEC).
+#[derive(Debug, Serialize)]
+pub struct PlanPayload {
+    pub schema_version: u32,
+    pub game: String,
+    pub revision: u64,
+    pub diff: crate::plan::PlanDiff,
+    /// Desired POP codes absent from the current feed (revision drift);
+    /// informational, not an error.
+    pub missing_from_feed: Vec<String>,
+    /// The exact nftables ruleset `apply` would submit.
+    pub ruleset: String,
+}
+
+/// `status --json`: journaled applied state; `applied` is None when nothing
+/// has been applied since boot. M3 extends this with verify/drift fields.
+#[derive(Debug, Serialize)]
+pub struct StatusPayload {
+    pub schema_version: u32,
+    pub applied: Option<crate::plan::AppliedState>,
+}
+
 /// Structured error on stderr when --json is active.
 #[derive(Debug, Serialize)]
 pub struct ErrorPayload {

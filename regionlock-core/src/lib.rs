@@ -8,11 +8,13 @@
 //! - Every fallible function returns [`Error`], which owns the process
 //!   exit-code mapping.
 
+pub mod backend;
 pub mod config;
 pub mod error;
 pub mod feed;
 pub mod game;
 pub mod payload;
+pub mod plan;
 pub mod regions;
 pub mod state;
 
