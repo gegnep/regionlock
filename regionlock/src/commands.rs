@@ -3,6 +3,8 @@
 //! Commands that land at later milestones answer "not yet wired" instead
 //! of touching plumbing.
 
+use std::collections::BTreeMap;
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,13 +15,21 @@ use regionlock_core::backend::{FirewallBackend, NftBackend};
 use regionlock_core::config::{ApplyMode, Config};
 use regionlock_core::feed::{self, Pop, SdrFeed};
 use regionlock_core::payload::{
-    DeltaPayload, ListPayload, PlanPayload, PopInfo, RegionInfo, RegionsPayload, StatusPayload,
+    DeltaPayload, ListPayload, PingValue, PlanPayload, PopInfo, RegionInfo, RegionsPayload,
+    StatusPayload,
 };
 use regionlock_core::plan::{AppliedState, PlanDiff, RulesetSpec};
 use regionlock_core::regions::{self, Classification, Region};
 use regionlock_core::state::{Delta, DesiredState};
-use regionlock_core::{Error, Game, SCHEMA_VERSION};
+use regionlock_core::{Error, Game, SCHEMA_VERSION, ping};
 use serde_json::json;
+
+/// Production ping binary name; tests override the effective binary via PATH.
+const PING_PROGRAM: &str = "ping";
+/// Per-probe timeout; short enough that a full sweep stays responsive.
+const PING_TIMEOUT_SECS: u32 = 1;
+/// Printed once, human mode only, when live probing falls back to estimates.
+const PING_UNAVAILABLE_NOTE: &str = "note: measured ping is unavailable (no `ping` binary, or it lacks permission for raw ICMP sockets); showing feed estimates instead. Install iputils-ping, or grant it CAP_NET_RAW, to enable live probing.";
 
 use crate::cli::{Cli, Command, GenerateCommand, PresetCommand};
 use crate::output::{Cell, Style, render_table};
@@ -128,7 +138,6 @@ pub fn run(cli: &Cli) -> Result<(), Failure> {
     // generate renders from the grammar alone: no config, cache, or network.
     match &cli.command {
         Command::Generate { what } => return cmd_generate(what),
-        Command::Ping { .. } => return Err(Failure::not_wired("ping", "M4")),
         Command::EnablePersist { .. } => return Err(Failure::not_wired("enable-persist", "M5")),
         Command::DisablePersist { .. } => return Err(Failure::not_wired("disable-persist", "M5")),
         _ => {}
@@ -181,11 +190,98 @@ pub fn run(cli: &Cli) -> Result<(), Failure> {
             json,
         } => cmd_apply(&ctx, *yes, *offline, *dry_run, *verbose, *json),
         Command::Teardown { yes, json } => cmd_teardown(&ctx, *yes, *json),
-        Command::Ping { .. }
-        | Command::EnablePersist { .. }
+        Command::Ping { json } => cmd_ping(&ctx, *json),
+        Command::EnablePersist { .. }
         | Command::DisablePersist { .. }
         | Command::Generate { .. } => unreachable!("early-return commands return above"),
     }
+}
+
+fn ping_targets(feed: &SdrFeed) -> Vec<(String, Ipv4Addr)> {
+    feed.blockable_pops()
+        .filter_map(|(code, pop)| {
+            pop.relays
+                .as_ref()
+                .and_then(|relays| relays.first())
+                .map(|relay| (code.to_string(), relay.ipv4))
+        })
+        .collect()
+}
+
+/// Resolve latency for every blockable POP into a lookup map: live probing
+/// when available, feed estimates otherwise. Used by `list --ping`, which
+/// renders once results settle.
+fn run_pings(ctx: &Ctx, feed: &SdrFeed) -> BTreeMap<String, PingValue> {
+    let targets = ping_targets(feed);
+    if ping::ping_available(PING_PROGRAM) {
+        ping::probe(targets, PING_TIMEOUT_SECS, PING_PROGRAM)
+            .into_iter()
+            .collect()
+    } else {
+        let home_pop = ctx.config.home_pop.as_deref();
+        targets
+            .into_iter()
+            .map(|(pop, _ip)| {
+                let value = ping::estimate(feed, home_pop, &pop);
+                (pop, value)
+            })
+            .collect()
+    }
+}
+
+fn cmd_ping(ctx: &Ctx, json: bool) -> Result<(), Failure> {
+    let feed = load_feed(ctx.game)?;
+    let targets = ping_targets(&feed);
+    let width = targets
+        .iter()
+        .map(|(code, _)| code.len())
+        .max()
+        .unwrap_or(0);
+
+    if ping::ping_available(PING_PROGRAM) {
+        // Stream each result as it arrives off the channel, not after
+        // collecting all of them (SPEC: NDJSON emits as results arrive).
+        let rx = ping::probe(targets, PING_TIMEOUT_SECS, PING_PROGRAM);
+        for (pop, value) in rx {
+            print_ping_result(&pop, &value, width, json, &ctx.style);
+        }
+    } else {
+        if !json {
+            eprintln!("{PING_UNAVAILABLE_NOTE}");
+        }
+        let home_pop = ctx.config.home_pop.as_deref();
+        for (pop, _ip) in &targets {
+            let value = ping::estimate(&feed, home_pop, pop);
+            print_ping_result(pop, &value, width, json, &ctx.style);
+        }
+    }
+    Ok(())
+}
+
+fn print_ping_result(pop: &str, value: &PingValue, width: usize, json: bool, style: &Style) {
+    if json {
+        // PingValue embeds via serde_json::Value: the bin depends on
+        // serde_json but not serde derive, and no new dep may be added.
+        let ping_value = serde_json::to_value(value).expect("PingValue serializes");
+        println!(
+            "{}",
+            json!({ "schema_version": SCHEMA_VERSION, "pop": pop, "ping": ping_value })
+        );
+    } else {
+        let text = match value {
+            PingValue::Measured(ms) => format!("{pop:width$}  {ms} ms"),
+            PingValue::Estimate(ms) => format!("{pop:width$}  ~{ms} ms (estimate)"),
+            PingValue::Unknown => format!("{pop:width$}  unknown"),
+        };
+        let line = match value {
+            PingValue::Measured(ms) | PingValue::Estimate(ms) if *ms < 60 => style.green(&text),
+            PingValue::Measured(ms) | PingValue::Estimate(ms) if *ms >= 150 => style.red(&text),
+            _ => text,
+        };
+        println!("{line}");
+    }
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
 }
 
 /// Q2-resolved confirmation UX: summary diff table with a y/N prompt; [v]
@@ -381,14 +477,18 @@ fn load_feed(game: Game) -> regionlock_core::Result<SdrFeed> {
 }
 
 fn cmd_list(ctx: &Ctx, ping: bool, show_regions: bool, json: bool) -> Result<(), Failure> {
-    if ping {
-        return Err(Failure::not_wired("list --ping", "M4"));
-    }
     if show_regions {
+        // --regions takes precedence over --ping and needs no feed.
         return print_regions(json, &ctx.style);
     }
     let feed = load_feed(ctx.game)?;
     let desired = ctx.config.desired(ctx.game);
+    // --ping runs every probe/estimate to completion, then renders.
+    let mut pings = if ping {
+        Some(run_pings(ctx, &feed))
+    } else {
+        None
+    };
     if json {
         let pops = feed
             .pops
@@ -401,7 +501,7 @@ fn cmd_list(ctx: &Ctx, ping: bool, show_regions: bool, json: bool) -> Result<(),
                 relay_count: pop.relays.as_ref().map_or(0, Vec::len),
                 tier: pop.tier,
                 blocked: desired.blocked.contains(code),
-                ping: None,
+                ping: pings.as_mut().and_then(|map| map.remove(code)),
             })
             .collect();
         let payload = ListPayload {
@@ -416,6 +516,11 @@ fn cmd_list(ctx: &Ctx, ping: bool, show_regions: bool, json: bool) -> Result<(),
         );
         return Ok(());
     }
+    let mut headers = vec!["CODE", "DESC", "REGIONS", "TIER", "RELAYS"];
+    if ping {
+        headers.push("PING");
+    }
+    headers.push("BLOCKED");
     let rows: Vec<Vec<Cell>> = feed
         .pops
         .iter()
@@ -427,7 +532,7 @@ fn cmd_list(ctx: &Ctx, ping: bool, show_regions: bool, json: bool) -> Result<(),
             } else {
                 Cell::green("ok")
             };
-            vec![
+            let mut row = vec![
                 Cell::plain(code.clone()),
                 Cell::plain(pop.desc.clone().unwrap_or_else(|| "-".to_string())),
                 Cell::plain(regions_label(code)),
@@ -436,18 +541,20 @@ fn cmd_list(ctx: &Ctx, ping: bool, show_regions: bool, json: bool) -> Result<(),
                         .map_or_else(|| "-".to_string(), |tier| tier.to_string()),
                 ),
                 Cell::plain(pop.relays.as_ref().map_or(0, Vec::len).to_string()),
-                marker,
-            ]
+            ];
+            if ping {
+                let cell = match pings.as_mut().and_then(|map| map.remove(code)) {
+                    Some(PingValue::Measured(ms)) => Cell::plain(format!("{ms}ms")),
+                    Some(PingValue::Estimate(ms)) => Cell::plain(format!("~{ms}ms est")),
+                    Some(PingValue::Unknown) | None => Cell::plain("?"),
+                };
+                row.push(cell);
+            }
+            row.push(marker);
+            row
         })
         .collect();
-    println!(
-        "{}",
-        render_table(
-            &["CODE", "DESC", "REGIONS", "TIER", "RELAYS", "BLOCKED"],
-            &rows,
-            &ctx.style
-        )
-    );
+    println!("{}", render_table(&headers, &rows, &ctx.style));
     Ok(())
 }
 

@@ -223,9 +223,9 @@ fn preset_roundtrip() {
 #[test]
 fn still_unwired_commands_report_milestone() {
     let env = TestEnv::new("unwired");
-    let out = env.run(&["ping"]);
+    let out = env.run(&["disable-persist"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("not yet wired: ping lands at M4"));
+    assert!(stderr(&out).contains("not yet wired: disable-persist lands at M5"));
 
     let out = env.run(&["enable-persist", "--json"]);
     assert_eq!(out.status.code(), Some(1));
