@@ -20,14 +20,21 @@ https://api.steampowered.com/ISteamApps/GetSDRConfig/v1/?appid=<APPID>
   schema. Multi-game support only switches the appid. The `--game` flag overrides the
   configured default.
 - Response fields include `revision` (cache key), `pops` (map of POP code → `desc`,
-  `geo` [lon, lat], `relays` [{`ipv4`, `port_range`}]), and `typical_pings` (inter-POP
-  latency matrix). Use `typical_pings` for estimated latency before real probing. The
+  `geo` [lon, lat], `relays` [{`ipv4`, `port_range`}]), and `typical_pings`. The
   response also contains SDR crypto fields (`certs`, `relay_public_key`, `revoked_keys`,
   `p2p_share_ip`), which we ignore. Parse tolerantly. Do NOT `deny_unknown_fields`.
-- Some POPs have no relays (currently `eat`, `fsn`, `hel`). Exclude them from the
-  blocklist UI, but keep them for the ping matrix. The feed is IPv4-only today. Do not
-  build v6 plumbing yet.
-- ~30 POPs have 2–14 relays each, for ~150 IPs total. Port ranges vary per relay.
+  POPs also carry `tier`, `partners`, and sometimes `aliases`; expose `tier` in
+  `list --json`.
+- `typical_pings` is a sparse list of `[from, to, ms]` triples, not a full matrix
+  (verified live: 105 entries for Deadlock's 32 POPs). Use it for estimated latency
+  before real probing. Label estimates as estimates. Show "unknown" for missing pairs;
+  do not synthesize values.
+- Some POPs have no relays; those omit the `relays` key entirely. For Deadlock the
+  relay-less POPs are `eat`, `fsn`, `hel`; Dota 2 has 32 (partner `m*` codes). Exclude
+  them from the blocklist UI, but keep them for ping estimates. The feed is IPv4-only
+  today. Do not build v6 plumbing yet.
+- Scale differs per game (verified live): Deadlock 32 POPs / 141 IPs, CS2 48 / 210,
+  Dota 2 61 / 141. Relay counts run 2–14 per POP. Port ranges vary per relay.
   Deliberately block **all UDP to relay IPs, ignoring ports**. Relays are dedicated Valve
   boxes. This avoids per-range rule complexity. Document this choice.
 - In README, state this honest limitation: blocking relays *biases* SDR routing. It does
@@ -60,6 +67,7 @@ regionlock block <pop|region>...          # e.g. `block fra ams`, `block eu`
 regionlock unblock <pop|region>...
 regionlock allow <pop|region>...          # exclusive: block everything else
 regionlock reset                          # clear desired state
+regionlock teardown [--yes]               # delete the nft table only (privileged)
 regionlock plan [--json]                  # diff desired vs applied + rendered nft
 regionlock apply [--yes] [--offline]      # plan → confirm → escalate once → atomic apply
 regionlock status [--json] [--verify]     # applied state; --verify escalates to diff real table
@@ -75,23 +83,34 @@ regionlock enable-persist / disable-persist   # systemd unit management (privile
 - Keep region aliases (`na`, `nae`, `naw`, `sa`, `eu`, `euw`, `eue`, `asia`, `apac`,
   `india`, `jp`, `kr`, `oce`, `me`, `af`) in a static table in core. Expose them through
   `list --regions --json` so wrappers never hardcode them.
+- `reset` and `teardown` are distinct. `reset` edits desired state and needs no
+  privileges. `teardown` deletes `table inet regionlock` and touches neither desired
+  state nor the boot snapshot. systemd `ExecStop` uses `teardown --yes`.
 
 ## Privilege model
 
 Run everything as the user. Escalate **only** when applying rules.
 
-- The `regionlock-apply` component is the only privileged component. It reads a plan from
-  **stdin or a file, never env**. pkexec sanitizes env. It validates the plan and refuses
-  to touch anything except `table inet regionlock`. It must not accept raw nft rulesets
-  from the caller. It constructs and validates the ruleset from the structured plan.
+- The `regionlock-apply` component is the only privileged component. It reads a typed,
+  versioned operation from **stdin or a file, never env**. pkexec sanitizes env. The
+  operation schema (ReplaceRuleset, DeleteTable, Inspect, EnablePersist, DisablePersist)
+  cannot express raw nft syntax or a table name. The applier validates POP codes, IPv4
+  addresses, and counts, then constructs the ruleset itself for `table inet regionlock`.
   This is a security boundary. Keep it tiny and auditable.
+- All applier operations serialize on a root-owned 0600 flock at `/run/regionlock/lock`.
+  A world-readable lock would let any user block privileged operations.
 - Implement escalation as a trait with these backends: `pkexec` (polkit; ship
   `org.pengeg.regionlock.policy` with a human-readable action message), `sudo`, `doas`,
   and `run0`. Auto-detect the backend, with a config override. pkexec needs an auth
   agent. Spawn `pkttyagent` as a fallback, then fall back to sudo.
-- Reading nft state also requires root. Unprivileged `status` reads `applied.json`, which
-  the applier writes on success. `status --verify` escalates and computes a diff against
-  the live table. It exits with code 2 on drift.
+- Reading nft state also requires root. The applier writes the applied-state journal to
+  the fixed path `/run/regionlock/applied.json` (root-owned dir, 0644 file, atomic
+  tmp+rename, never a caller-supplied path). Unprivileged `status` reads that path.
+  `status --verify` escalates and computes a diff against the live table. It exits with
+  code 2 on drift.
+- The journal write is two-phase: pending intent record, nft apply, commit rename. The
+  next applier invocation reconciles a leftover pending record against the live table.
+  `/run` clears on reboot, which matches the ruleset lifetime.
 
 ## Firewall backend
 
@@ -116,8 +135,8 @@ Shelling out to `nft` is the maintainable choice. Do not take on netlink crates.
   home-manager module (`programs.regionlock`) follows from this layout.
 - `~/.cache/regionlock/` stores SDR feeds per appid, keyed on `revision`. It powers
   `--offline`.
-- `~/.local/state/regionlock/applied.json` stores the state actually in the firewall.
-  The applier writes it at apply time.
+- `/run/regionlock/applied.json` stores the state actually in the firewall. The applier
+  writes it at apply time (see privilege model). No `~/.local/state` use in v1.
 - Resolve config in this order: `--config`, `$REGIONLOCK_CONFIG`, user XDG, then
   `/etc/regionlock/config.toml`.
 
@@ -134,12 +153,18 @@ After=network-online.target nftables.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=regionlock apply --yes --offline
-ExecStop=regionlock reset --yes
+ExecStop=regionlock teardown --yes
 ```
 
 - The unit runs as root. It needs no escalation.
-- `enable-persist` snapshots the user's desired state into `/etc/regionlock/`. Boot-time
-  apply is then self-contained and does not depend on a user homedir.
+- `enable-persist` snapshots the user's desired state AND the pinned feed data
+  (revision plus per-POP relay IPs for the selected game) into `/etc/regionlock/`.
+  Boot-time apply is then self-contained and does not depend on a user homedir or cache.
+- Unit files are static packaging artifacts. Nothing writes unit content at runtime.
+  `enable-persist`/`disable-persist` are idempotent applier transactions (snapshot write
+  plus `systemctl enable`/`disable`), with prior-state compensation on partial failure.
+  On NixOS (unit path in `/nix/store`) they skip the systemctl step and defer to the
+  module.
 - Use `--offline` at boot. Apply from cache and do not race the network.
 - Optionally use `regionlock-refresh.timer` to keep the cache fresh.
 
@@ -203,13 +228,16 @@ Use this section for reference. Do not vendor these projects.
 Out-of-scope features for v1 are TUI (v2, builds on core), iptables backend, Windows/macOS,
 IPv6, and GUI. Do not speculatively build them beyond the trait seams already specified.
 
-## Open questions
+## Resolved decisions
 
-Resolve these questions with the user. Do not guess.
+The user resolved these on 2026-07-21. They are binding for v1.
 
-- Session-scoped cleanup UX for the CLI: Which event triggers cleanup? No long-lived
-  process runs in CLI mode. Likely, rules persist until `reset` or reboot unless persist
-  is enabled. Confirm this behavior.
-- Define the exact confirmation UX for `apply`, including the prompt style and what the plan
-  render looks like.
-- Decide whether preset semantics are per-game or global.
+- Cleanup: rules persist until `reset`/`teardown` or reboot. On startup, detect an
+  orphaned table and offer cleanup interactively.
+- `apply` confirmation: colored summary diff table (POPs, IP counts, game, revision)
+  with a y/N prompt. The full nft ruleset renders behind `[v]`/`--verbose` and always
+  via `--dry-run`.
+- Presets are per-game.
+- Ping estimate gaps show "unknown"; no synthesized values.
+- `list --json` includes the feed `tier` field.
+- The firewall-only cleanup verb is `regionlock teardown [--yes]`.
