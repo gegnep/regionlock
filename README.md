@@ -87,6 +87,25 @@ Prefer `inputs.nixpkgs.follows = "nixpkgs"`. The applier's runtime deps
 `overlays.default` exposes `pkgs.regionlock` if you would rather not use the
 module.
 
+### Arch Linux (AUR)
+
+```
+paru -S regionlock   # or your AUR helper of choice
+```
+
+### From source (any FHS distro)
+
+```
+make
+sudo make install PREFIX=/usr
+sudo systemctl daemon-reload
+```
+
+Install to `PREFIX=/usr`, not the default `/usr/local`. systemd does not read
+units from `/usr/local/lib`, so persistence needs `/usr`. The install stages
+the binaries, the polkit action, the systemd units, shell completions, and
+the man page. Runtime deps: nftables, systemd, iputils, polkit.
+
 ### Standalone build
 
 ```
