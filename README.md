@@ -114,10 +114,9 @@ directly without an escalator.
 
 ## Scope
 
-v1 is a Linux CLI. A TUI, an iptables backend, IPv6, and Windows/macOS are
-out of scope. The core library carries no UI dependencies, so a future TUI
-reuses it whole. The original design SPEC lived in `docs/SPEC.md`. Git
-history preserves it now that v1 is done.
+v1 is a Linux CLI. A TUI is the planned v2. The core library carries no UI
+dependencies, so the TUI reuses it whole and needs no core changes. An
+iptables backend, IPv6, and Windows/macOS stay out of scope.
 
 ## License
 
