@@ -45,6 +45,15 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// Escalation failed; `attempted` names every backend tried (SPEC
+    /// polish requirement: say which backend was tried).
+    #[error("escalation failed after trying {attempted}: {reason}")]
+    Escalation { attempted: String, reason: String },
+
+    /// The applier refused the operation (its own validation layer).
+    #[error("applier refused: {reason}")]
+    ApplierRefused { reason: String },
+
     /// Live firewall state does not match the applied-state journal.
     /// Maps to exit code 2; not an error in the usual sense.
     #[error("firewall state drifted from the applied-state journal")]
@@ -77,6 +86,8 @@ impl Error {
             Error::FeedFetch { .. } => "feed_fetch",
             Error::FeedParse(_) => "feed_parse",
             Error::JournalParse { .. } => "journal_parse",
+            Error::Escalation { .. } => "escalation",
+            Error::ApplierRefused { .. } => "applier_refused",
             Error::NoCachedFeed { .. } => "no_cached_feed",
             Error::CacheDirUnavailable { .. } => "cache_dir_unavailable",
             Error::UnknownSelector { .. } => "unknown_selector",

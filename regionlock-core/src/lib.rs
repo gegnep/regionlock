@@ -11,6 +11,7 @@
 pub mod backend;
 pub mod config;
 pub mod error;
+pub mod escalate;
 pub mod feed;
 pub mod game;
 pub mod ops;

@@ -128,11 +128,6 @@ pub fn run(cli: &Cli) -> Result<(), Failure> {
     // generate renders from the grammar alone: no config, cache, or network.
     match &cli.command {
         Command::Generate { what } => return cmd_generate(what),
-        Command::Teardown { .. } => return Err(Failure::not_wired("teardown", "M2-M3")),
-        Command::Apply { .. } => return Err(Failure::not_wired("apply", "M2-M3")),
-        Command::Status { verify: true, .. } => {
-            return Err(Failure::not_wired("status --verify", "M3"));
-        }
         Command::Ping { .. } => return Err(Failure::not_wired("ping", "M4")),
         Command::EnablePersist { .. } => return Err(Failure::not_wired("enable-persist", "M5")),
         Command::DisablePersist { .. } => return Err(Failure::not_wired("disable-persist", "M5")),
@@ -177,13 +172,169 @@ pub fn run(cli: &Cli) -> Result<(), Failure> {
         Command::Preset(subcommand) => cmd_preset(&mut ctx, subcommand),
         Command::Game { set, json } => cmd_game(&mut ctx, *set, *json),
         Command::Plan { json } => cmd_plan(&ctx, *json),
-        Command::Status { verify, json } => cmd_status(*verify, *json),
-        Command::Teardown { .. }
-        | Command::Apply { .. }
-        | Command::Ping { .. }
+        Command::Status { verify, json } => cmd_status(&ctx, *verify, *json),
+        Command::Apply {
+            yes,
+            offline,
+            dry_run,
+            verbose,
+            json,
+        } => cmd_apply(&ctx, *yes, *offline, *dry_run, *verbose, *json),
+        Command::Teardown { yes, json } => cmd_teardown(&ctx, *yes, *json),
+        Command::Ping { .. }
         | Command::EnablePersist { .. }
         | Command::DisablePersist { .. }
         | Command::Generate { .. } => unreachable!("early-return commands return above"),
+    }
+}
+
+/// Q2-resolved confirmation UX: summary diff table with a y/N prompt; [v]
+/// expands the full ruleset; --verbose shows it immediately; --yes skips.
+/// Returns false when the user declines.
+fn confirm(prompt_target: &str, ruleset: &str, verbose: bool) -> Result<bool, Failure> {
+    use std::io::{BufRead, IsTerminal};
+    if verbose {
+        print!("{ruleset}");
+    }
+    if !std::io::stdin().is_terminal() {
+        // Non-interactive without --yes: refuse rather than hang or assume.
+        eprintln!("stdin is not a terminal; use --yes for unattended {prompt_target}");
+        return Ok(false);
+    }
+    loop {
+        print!("{prompt_target}? [y/N{}] ", if verbose { "" } else { "/v" });
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().lock().read_line(&mut line).is_err() {
+            return Ok(false);
+        }
+        match line.trim() {
+            "y" | "Y" | "yes" => return Ok(true),
+            "v" | "V" if !verbose => print!("{ruleset}"),
+            _ => return Ok(false),
+        }
+    }
+}
+
+fn cmd_apply(
+    ctx: &Ctx,
+    yes: bool,
+    offline: bool,
+    dry_run: bool,
+    verbose: bool,
+    json: bool,
+) -> Result<(), Failure> {
+    let feed = if offline {
+        feed::cache::load_latest(ctx.game)?.ok_or(Error::NoCachedFeed { game: ctx.game })?
+    } else {
+        load_feed(ctx.game)?
+    };
+    let (spec, missing) = RulesetSpec::build(&ctx.config, ctx.game, &feed);
+    let applied = AppliedState::read()?;
+    let diff = PlanDiff::compute(&spec, applied.as_ref());
+    let ruleset = NftBackend.render(&spec);
+
+    if dry_run {
+        // Trust + debugging: the exact ruleset, no escalation, no mutation.
+        print!("{ruleset}");
+        return Ok(());
+    }
+    if diff.is_empty() {
+        if json {
+            println!(
+                "{}",
+                json!({ "schema_version": SCHEMA_VERSION, "applied": false, "reason": "nothing to do" })
+            );
+        } else {
+            println!("nothing to do");
+        }
+        return Ok(());
+    }
+
+    if !yes {
+        println!("  game: {} (rev {})", ctx.game.name(), spec.revision);
+        print_plan_line("  block", &diff.to_block);
+        print_plan_line("  unblock", &diff.to_unblock);
+        print_plan_line("  update", &diff.to_update);
+        if !missing.is_empty() {
+            println!("  note: absent from feed: {}", missing.join(", "));
+        }
+        println!(
+            "  {} POPs blocked after apply, {} IPs total.",
+            spec.pops.len(),
+            spec.pops.values().map(Vec::len).sum::<usize>()
+        );
+        if !confirm("Apply", &ruleset, verbose)? {
+            eprintln!("aborted");
+            return Err(Failure::Usage {
+                message: "apply aborted".into(),
+            });
+        }
+    }
+
+    let operation = regionlock_core::ops::Operation::replace_from_spec(&spec);
+    let reply = regionlock_core::escalate::run_applier(ctx.config.escalator, &operation)?;
+    match reply {
+        regionlock_core::ops::Reply::Applied { journal } => {
+            if json {
+                println!(
+                    "{}",
+                    json!({ "schema_version": SCHEMA_VERSION, "applied": true, "journal": journal })
+                );
+            } else {
+                println!(
+                    "applied: {} POPs blocked ({} IPs)",
+                    journal.pops.len(),
+                    journal.pops.values().map(Vec::len).sum::<usize>()
+                );
+            }
+            Ok(())
+        }
+        regionlock_core::ops::Reply::Refused { reason } => {
+            Err(Error::ApplierRefused { reason }.into())
+        }
+        other => Err(Failure::Usage {
+            message: format!("unexpected applier reply: {other:?}"),
+        }),
+    }
+}
+
+fn cmd_teardown(ctx: &Ctx, yes: bool, json: bool) -> Result<(), Failure> {
+    if !yes {
+        println!("teardown deletes `table inet regionlock` from the firewall.");
+        println!("Desired state and any boot snapshot stay untouched.");
+        if !confirm("Teardown", "", true)? {
+            eprintln!("aborted");
+            return Err(Failure::Usage {
+                message: "teardown aborted".into(),
+            });
+        }
+    }
+    let operation = regionlock_core::ops::Operation::DeleteTable {
+        ops_version: regionlock_core::ops::OPS_VERSION,
+    };
+    let reply = regionlock_core::escalate::run_applier(ctx.config.escalator, &operation)?;
+    match reply {
+        regionlock_core::ops::Reply::Deleted { existed } => {
+            if json {
+                println!(
+                    "{}",
+                    json!({ "schema_version": SCHEMA_VERSION, "deleted": true, "existed": existed })
+                );
+            } else if existed {
+                println!("table inet regionlock removed");
+            } else {
+                println!("no table to remove");
+            }
+            Ok(())
+        }
+        regionlock_core::ops::Reply::Refused { reason } => {
+            Err(Error::ApplierRefused { reason }.into())
+        }
+        other => Err(Failure::Usage {
+            message: format!("unexpected applier reply: {other:?}"),
+        }),
     }
 }
 
@@ -349,9 +500,9 @@ fn print_plan_line(label: &str, codes: &[String]) {
     }
 }
 
-fn cmd_status(verify: bool, json: bool) -> Result<(), Failure> {
+fn cmd_status(ctx: &Ctx, verify: bool, json: bool) -> Result<(), Failure> {
     if verify {
-        return Err(Failure::not_wired("status --verify", "M3"));
+        return cmd_status_verify(ctx, json);
     }
 
     let applied = AppliedState::read()?;
@@ -384,6 +535,61 @@ fn cmd_status(verify: bool, json: bool) -> Result<(), Failure> {
         None => println!("nothing applied"),
     }
     Ok(())
+}
+
+/// `status --verify`: escalate an Inspect and diff the live table against
+/// the journal. Exit 2 (Error::Drift) on mismatch (SPEC exit codes).
+fn cmd_status_verify(ctx: &Ctx, json: bool) -> Result<(), Failure> {
+    let operation = regionlock_core::ops::Operation::Inspect {
+        ops_version: regionlock_core::ops::OPS_VERSION,
+    };
+    let reply = regionlock_core::escalate::run_applier(ctx.config.escalator, &operation)?;
+    let regionlock_core::ops::Reply::Inspected {
+        live,
+        journal,
+        reconciled_pending,
+    } = reply
+    else {
+        if let regionlock_core::ops::Reply::Refused { reason } = reply {
+            return Err(Error::ApplierRefused { reason }.into());
+        }
+        return Err(Failure::Usage {
+            message: "unexpected applier reply to inspect".into(),
+        });
+    };
+
+    let journal_pops = journal.as_ref().map(|state| &state.pops);
+    let in_sync = match (&live, journal_pops) {
+        (None, None) => true,
+        (Some(live_pops), Some(journal_pops)) => live_pops == journal_pops,
+        _ => false,
+    };
+
+    if json {
+        println!(
+            "{}",
+            json!({
+                "schema_version": SCHEMA_VERSION,
+                "verified": in_sync,
+                "reconciled_pending": reconciled_pending,
+                "live_pops": live.as_ref().map(|pops| pops.len()),
+                "journal": journal,
+            })
+        );
+    } else if in_sync {
+        println!(
+            "verified: firewall matches the journal ({})",
+            match &live {
+                Some(pops) => format!("{} POPs", pops.len()),
+                None => "nothing applied".to_string(),
+            }
+        );
+    }
+    if in_sync {
+        Ok(())
+    } else {
+        Err(Error::Drift.into())
+    }
 }
 
 /// The region alias table (human or RegionsPayload), so wrappers never
@@ -480,7 +686,7 @@ fn finish_mutation(ctx: &Ctx, delta: Delta, apply: bool, json: bool) -> Result<(
             now_blocked: delta.now_blocked,
             now_unblocked: delta.now_unblocked,
             blocked_total: ctx.config.desired(ctx.game).blocked.len(),
-            staged: true,
+            staged,
         };
         println!(
             "{}",
@@ -495,7 +701,9 @@ fn finish_mutation(ctx: &Ctx, delta: Delta, apply: bool, json: bool) -> Result<(
         }
         Ok(())
     } else {
-        Err(Failure::not_wired("apply", "M2-M3"))
+        // One-shot (-a) or apply_mode = "auto": reconcile now. The Q2
+        // confirmation still applies; --yes exists on `apply` for scripts.
+        cmd_apply(ctx, false, false, false, false, json)
     }
 }
 

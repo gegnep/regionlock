@@ -223,11 +223,11 @@ fn preset_roundtrip() {
 #[test]
 fn still_unwired_commands_report_milestone() {
     let env = TestEnv::new("unwired");
-    let out = env.run(&["teardown"]);
+    let out = env.run(&["ping"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("not yet wired: teardown lands at M2-M3"));
+    assert!(stderr(&out).contains("not yet wired: ping lands at M4"));
 
-    let out = env.run(&["apply", "--json"]);
+    let out = env.run(&["enable-persist", "--json"]);
     assert_eq!(out.status.code(), Some(1));
     let value: serde_json::Value = serde_json::from_str(&stderr(&out)).unwrap();
     assert_eq!(value["schema_version"], 1);
@@ -235,13 +235,33 @@ fn still_unwired_commands_report_milestone() {
         value["error"]
             .as_str()
             .unwrap()
-            .contains("not yet wired: apply")
+            .contains("not yet wired: enable-persist")
     );
     assert_eq!(value["exit_code"], 1);
     assert!(
         value.get("kind").is_none(),
         "not-wired errors are CLI-composed, no core kind"
     );
+}
+
+#[test]
+fn interactive_commands_refuse_without_tty_or_yes() {
+    // Wired privileged commands must never hang or escalate in a pipe:
+    // without --yes and without a terminal they abort before escalation.
+    let env = TestEnv::new("no-tty");
+    env.run_ok(&["block", "fra"]);
+
+    let out = env.run(&["apply"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("use --yes"),
+        "apply refuses non-interactively: {}",
+        stderr(&out)
+    );
+
+    let out = env.run(&["teardown"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("use --yes"));
 }
 
 #[test]
@@ -306,23 +326,46 @@ fn status_json_reports_no_applied_state() {
 }
 
 #[test]
-fn status_verify_remains_unwired() {
+fn status_verify_fails_hermetically_without_escalators() {
+    // With an empty PATH there is no pkexec/sudo/doas/run0, so --verify
+    // must fail with a structured escalation error naming what was tried —
+    // and must never touch a real escalator in tests.
     let env = TestEnv::new("status-verify");
+    let empty = env.dir.join("empty-path");
+    std::fs::create_dir_all(&empty).unwrap();
 
-    let out = env.run(&["status", "--verify"]);
+    let out = Command::new(env!("CARGO_BIN_EXE_regionlock"))
+        .arg("--config")
+        .arg(&env.config)
+        .args(["status", "--verify", "--json"])
+        .env("XDG_CACHE_HOME", &env.cache)
+        .env_remove("REGIONLOCK_CONFIG")
+        .env("PATH", &empty)
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("not yet wired: status --verify lands at M3"));
+    let value: serde_json::Value = serde_json::from_str(&stderr(&out)).unwrap();
+    assert_eq!(value["kind"], "escalation");
+    // Failure point depends on the build layout: either the applier binary
+    // is not adjacent/on PATH, or the backends are named as not installed.
+    let error = value["error"].as_str().unwrap();
+    assert!(
+        error.contains("not installed") || error.contains("regionlock-apply"),
+        "attempts are named: {error}"
+    );
 }
 
 #[test]
 fn apply_flag_persists_state_before_failing() {
+    // -a wires into the real apply flow now; in a pipe without --yes the
+    // confirmation refuses before escalation, exit 1, state persisted.
     let env = TestEnv::new("apply-flag");
     let out = env.run(&["block", "fra", "--apply"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("not yet wired: apply lands at M2-M3"));
+    assert!(stderr(&out).contains("use --yes"));
     assert!(
         env.desired().contains("fra"),
-        "state persists even on the not-wired exit"
+        "state persists even on the aborted-apply exit"
     );
 }
 
