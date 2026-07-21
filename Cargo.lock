@@ -360,6 +360,7 @@ dependencies = [
 name = "regionlock-apply"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "regionlock-core",
  "serde",
  "serde_json",

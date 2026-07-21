@@ -13,6 +13,7 @@ pub mod config;
 pub mod error;
 pub mod feed;
 pub mod game;
+pub mod ops;
 pub mod payload;
 pub mod ping;
 pub mod plan;
