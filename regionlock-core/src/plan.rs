@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -33,8 +34,30 @@ impl RulesetSpec {
     /// the feed (revision drift) are returned in the second tuple slot so
     /// callers can surface them; they are not an error.
     pub fn build(config: &Config, game: Game, feed: &SdrFeed) -> (RulesetSpec, Vec<String>) {
-        let (_, _, _) = (config, game, feed);
-        todo!("M2I")
+        let desired = config.desired(game).blocked;
+        let mut pops = BTreeMap::new();
+        let mut missing = Vec::new();
+
+        for code in desired {
+            let Some(pop) = feed.pops.get(&code) else {
+                missing.push(code);
+                continue;
+            };
+            let Some(relays) = pop.relays.as_ref().filter(|relays| !relays.is_empty()) else {
+                missing.push(code);
+                continue;
+            };
+            pops.insert(code, relays.iter().map(|relay| relay.ipv4).collect());
+        }
+
+        (
+            RulesetSpec {
+                game,
+                revision: feed.revision,
+                pops,
+            },
+            missing,
+        )
     }
 }
 
@@ -68,7 +91,22 @@ impl AppliedState {
     /// Read the journal (unprivileged). Ok(None) when absent (nothing
     /// applied since boot).
     pub fn read() -> crate::Result<Option<AppliedState>> {
-        todo!("M2I: read + parse JOURNAL_PATH; NotFound → None")
+        let path = PathBuf::from(Self::JOURNAL_PATH);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(crate::Error::Io { path, source }),
+        };
+        Self::parse(&bytes).map(Some)
+    }
+
+    /// Parse a journal payload without reading the fixed runtime path.
+    /// Failures always name the journal path so every caller reports it.
+    pub fn parse(bytes: &[u8]) -> crate::Result<AppliedState> {
+        serde_json::from_slice(bytes).map_err(|source| crate::Error::JournalParse {
+            path: PathBuf::from(Self::JOURNAL_PATH),
+            source,
+        })
     }
 }
 
@@ -86,8 +124,30 @@ pub struct PlanDiff {
 impl PlanDiff {
     /// Compare target vs applied (None = clean slate). All four lists sorted.
     pub fn compute(target: &RulesetSpec, applied: Option<&AppliedState>) -> PlanDiff {
-        let (_, _) = (target, applied);
-        todo!("M2I")
+        let Some(applied) = applied else {
+            return PlanDiff {
+                to_block: target.pops.keys().cloned().collect(),
+                ..PlanDiff::default()
+            };
+        };
+
+        let mut diff = PlanDiff::default();
+        for code in target.pops.keys() {
+            match applied.pops.get(code) {
+                None => diff.to_block.push(code.clone()),
+                Some(applied_ips) if applied_ips != &target.pops[code] => {
+                    diff.to_update.push(code.clone());
+                }
+                Some(_) => diff.unchanged.push(code.clone()),
+            }
+        }
+        diff.to_unblock = applied
+            .pops
+            .keys()
+            .filter(|code| !target.pops.contains_key(*code))
+            .cloned()
+            .collect();
+        diff
     }
 
     pub fn is_empty(&self) -> bool {

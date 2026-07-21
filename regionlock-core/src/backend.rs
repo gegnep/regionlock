@@ -48,7 +48,29 @@ impl FirewallBackend for NftBackend {
     }
 
     fn render(&self, spec: &RulesetSpec) -> String {
-        let _ = spec;
-        todo!("M2I")
+        let mut ruleset = String::from("table inet regionlock\ndelete table inet regionlock\n");
+        if spec.pops.is_empty() {
+            return ruleset;
+        }
+
+        ruleset.push_str("table inet regionlock {\n");
+        for (code, ips) in &spec.pops {
+            let elements = ips
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            ruleset.push_str(&format!(
+                "    set pop_{code} {{\n        type ipv4_addr\n        elements = {{ {elements} }}\n    }}\n"
+            ));
+        }
+        ruleset.push_str(
+            "    chain out {\n        type filter hook output priority filter; policy accept;\n",
+        );
+        for code in spec.pops.keys() {
+            ruleset.push_str(&format!("        udp daddr @pop_{code} drop\n"));
+        }
+        ruleset.push_str("    }\n}\n");
+        ruleset
     }
 }

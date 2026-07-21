@@ -4,13 +4,18 @@
 //! of touching plumbing.
 
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::CommandFactory;
 use clap_complete::{Shell, generate as write_completions};
 use clap_complete_nushell::Nushell;
+use regionlock_core::backend::{FirewallBackend, NftBackend};
 use regionlock_core::config::{ApplyMode, Config};
 use regionlock_core::feed::{self, Pop, SdrFeed};
-use regionlock_core::payload::{DeltaPayload, ListPayload, PopInfo, RegionInfo, RegionsPayload};
+use regionlock_core::payload::{
+    DeltaPayload, ListPayload, PlanPayload, PopInfo, RegionInfo, RegionsPayload, StatusPayload,
+};
+use regionlock_core::plan::{AppliedState, PlanDiff, RulesetSpec};
 use regionlock_core::regions::{self, Classification, Region};
 use regionlock_core::state::{Delta, DesiredState};
 use regionlock_core::{Error, Game, SCHEMA_VERSION};
@@ -124,9 +129,10 @@ pub fn run(cli: &Cli) -> Result<(), Failure> {
     match &cli.command {
         Command::Generate { what } => return cmd_generate(what),
         Command::Teardown { .. } => return Err(Failure::not_wired("teardown", "M2-M3")),
-        Command::Plan { .. } => return Err(Failure::not_wired("plan", "M2-M3")),
         Command::Apply { .. } => return Err(Failure::not_wired("apply", "M2-M3")),
-        Command::Status { .. } => return Err(Failure::not_wired("status", "M2-M3")),
+        Command::Status { verify: true, .. } => {
+            return Err(Failure::not_wired("status --verify", "M3"));
+        }
         Command::Ping { .. } => return Err(Failure::not_wired("ping", "M4")),
         Command::EnablePersist { .. } => return Err(Failure::not_wired("enable-persist", "M5")),
         Command::DisablePersist { .. } => return Err(Failure::not_wired("disable-persist", "M5")),
@@ -170,10 +176,10 @@ pub fn run(cli: &Cli) -> Result<(), Failure> {
         }
         Command::Preset(subcommand) => cmd_preset(&mut ctx, subcommand),
         Command::Game { set, json } => cmd_game(&mut ctx, *set, *json),
+        Command::Plan { json } => cmd_plan(&ctx, *json),
+        Command::Status { verify, json } => cmd_status(*verify, *json),
         Command::Teardown { .. }
-        | Command::Plan { .. }
         | Command::Apply { .. }
-        | Command::Status { .. }
         | Command::Ping { .. }
         | Command::EnablePersist { .. }
         | Command::DisablePersist { .. }
@@ -291,6 +297,92 @@ fn cmd_list(ctx: &Ctx, ping: bool, show_regions: bool, json: bool) -> Result<(),
             &ctx.style
         )
     );
+    Ok(())
+}
+
+fn cmd_plan(ctx: &Ctx, json: bool) -> Result<(), Failure> {
+    let feed = load_feed(ctx.game)?;
+    let (spec, missing_from_feed) = RulesetSpec::build(&ctx.config, ctx.game, &feed);
+    let applied = AppliedState::read()?;
+    let diff = PlanDiff::compute(&spec, applied.as_ref());
+    let ruleset = NftBackend.render(&spec);
+
+    if json {
+        let payload = PlanPayload {
+            schema_version: SCHEMA_VERSION,
+            game: ctx.game.name().to_string(),
+            revision: spec.revision,
+            diff,
+            missing_from_feed,
+            ruleset,
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&payload).expect("PlanPayload serializes")
+        );
+        return Ok(());
+    }
+
+    if diff.is_empty() {
+        println!("nothing to do");
+    } else {
+        print_plan_line("to block", &diff.to_block);
+        print_plan_line("to unblock", &diff.to_unblock);
+        print_plan_line("to update", &diff.to_update);
+    }
+    if !missing_from_feed.is_empty() {
+        println!(
+            "note: desired POPs absent from feed revision {}: {}",
+            spec.revision,
+            missing_from_feed.join(", ")
+        );
+    }
+    print!("{ruleset}");
+    Ok(())
+}
+
+fn print_plan_line(label: &str, codes: &[String]) {
+    if codes.is_empty() {
+        println!("{label}: 0");
+    } else {
+        println!("{label}: {} ({})", codes.len(), codes.join(", "));
+    }
+}
+
+fn cmd_status(verify: bool, json: bool) -> Result<(), Failure> {
+    if verify {
+        return Err(Failure::not_wired("status --verify", "M3"));
+    }
+
+    let applied = AppliedState::read()?;
+    if json {
+        let payload = StatusPayload {
+            schema_version: SCHEMA_VERSION,
+            applied,
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&payload).expect("StatusPayload serializes")
+        );
+        return Ok(());
+    }
+
+    match applied {
+        Some(applied) => {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs());
+            let age = now.saturating_sub(applied.applied_at);
+            println!(
+                "applied: game={} revision={} POPs={} age={}s",
+                applied.game,
+                applied.revision,
+                applied.pops.len(),
+                age
+            );
+        }
+        None => println!("nothing applied"),
+    }
     Ok(())
 }
 

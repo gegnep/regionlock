@@ -1,0 +1,22 @@
+table inet regionlock
+delete table inet regionlock
+table inet regionlock {
+    set pop_ams {
+        type ipv4_addr
+        elements = { 155.133.248.36, 155.133.248.37, 155.133.248.40, 155.133.248.41 }
+    }
+    set pop_atl {
+        type ipv4_addr
+        elements = { 162.254.199.170, 162.254.199.173, 162.254.199.178, 162.254.199.180 }
+    }
+    set pop_dfw {
+        type ipv4_addr
+        elements = { 162.254.194.37, 162.254.194.38, 162.254.194.53, 162.254.194.54 }
+    }
+    chain out {
+        type filter hook output priority filter; policy accept;
+        udp daddr @pop_ams drop
+        udp daddr @pop_atl drop
+        udp daddr @pop_dfw drop
+    }
+}

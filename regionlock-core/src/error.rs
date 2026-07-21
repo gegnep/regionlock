@@ -13,6 +13,13 @@ pub enum Error {
     #[error("failed to parse SDR feed: {0}")]
     FeedParse(#[from] serde_json::Error),
 
+    #[error("failed to parse applied-state journal at {path}: {source}")]
+    JournalParse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+
     #[error("no cached feed for {game} and --offline was requested")]
     NoCachedFeed { game: crate::Game },
 
@@ -69,6 +76,7 @@ impl Error {
         match self {
             Error::FeedFetch { .. } => "feed_fetch",
             Error::FeedParse(_) => "feed_parse",
+            Error::JournalParse { .. } => "journal_parse",
             Error::NoCachedFeed { .. } => "no_cached_feed",
             Error::CacheDirUnavailable { .. } => "cache_dir_unavailable",
             Error::UnknownSelector { .. } => "unknown_selector",

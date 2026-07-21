@@ -221,13 +221,13 @@ fn preset_roundtrip() {
 }
 
 #[test]
-fn unwired_commands_report_milestone() {
+fn still_unwired_commands_report_milestone() {
     let env = TestEnv::new("unwired");
-    let out = env.run(&["plan"]);
+    let out = env.run(&["teardown"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("not yet wired: plan lands at M2-M3"));
+    assert!(stderr(&out).contains("not yet wired: teardown lands at M2-M3"));
 
-    let out = env.run(&["plan", "--json"]);
+    let out = env.run(&["apply", "--json"]);
     assert_eq!(out.status.code(), Some(1));
     let value: serde_json::Value = serde_json::from_str(&stderr(&out)).unwrap();
     assert_eq!(value["schema_version"], 1);
@@ -235,13 +235,83 @@ fn unwired_commands_report_milestone() {
         value["error"]
             .as_str()
             .unwrap()
-            .contains("not yet wired: plan")
+            .contains("not yet wired: apply")
     );
     assert_eq!(value["exit_code"], 1);
     assert!(
         value.get("kind").is_none(),
         "not-wired errors are CLI-composed, no core kind"
     );
+}
+
+#[test]
+fn plan_json_reports_diff_and_ruleset() {
+    let env = TestEnv::new("plan-json");
+    env.run_ok(&["block", "fra"]);
+
+    let out = env.run_ok(&["plan", "--json"]);
+    let value: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["game"], "deadlock");
+    assert!(
+        value["diff"]["to_block"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "fra")
+    );
+    assert!(
+        value["ruleset"]
+            .as_str()
+            .unwrap()
+            .contains("table inet regionlock")
+    );
+    assert!(
+        value["ruleset"]
+            .as_str()
+            .unwrap()
+            .contains("udp daddr @pop_fra drop")
+    );
+}
+
+#[test]
+fn plan_human_output_contains_rendered_ruleset() {
+    let env = TestEnv::new("plan-human");
+    env.run_ok(&["block", "fra"]);
+
+    let out = env.run_ok(&["plan"]);
+    let text = stdout(&out);
+    assert!(
+        text.contains("to block: 1 (fra)"),
+        "summary mentions fra: {text}"
+    );
+    assert!(
+        text.contains("table inet regionlock"),
+        "ruleset is rendered: {text}"
+    );
+    assert!(
+        text.contains("udp daddr @pop_fra drop"),
+        "fra rule is rendered: {text}"
+    );
+}
+
+#[test]
+fn status_json_reports_no_applied_state() {
+    let env = TestEnv::new("status-json");
+
+    let out = env.run_ok(&["status", "--json"]);
+    let value: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert!(value["applied"].is_null());
+}
+
+#[test]
+fn status_verify_remains_unwired() {
+    let env = TestEnv::new("status-verify");
+
+    let out = env.run(&["status", "--verify"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("not yet wired: status --verify lands at M3"));
 }
 
 #[test]
