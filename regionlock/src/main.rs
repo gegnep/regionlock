@@ -1,10 +1,17 @@
+//! regionlock CLI: parses the frozen grammar (cli.rs), runs commands
+//! against regionlock-core, and owns process-level concerns: human/JSON
+//! output shapes, exit codes, and terminal styling.
+
 mod cli;
+mod commands;
+mod output;
 
 use clap::Parser;
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     let cli = cli::Cli::parse();
-    // M1e wires commands to regionlock-core; until then every command is
-    // an explicit stub so the grammar is testable.
-    anyhow::bail!("not yet wired: {:?}", cli.command)
+    if let Err(failure) = commands::run(&cli) {
+        let code = failure.report(commands::json_requested(&cli.command));
+        std::process::exit(code);
+    }
 }
