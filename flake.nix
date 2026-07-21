@@ -15,6 +15,10 @@
         default = self.packages.${system}.regionlock;
       };
 
+      # `nix flake check` builds the package, whose doCheck runs the full
+      # test suite (including nft --check where nft can init netlink).
+      checks.${system}.regionlock = self.packages.${system}.regionlock;
+
       # Consume as a flake input:
       #   imports = [ inputs.regionlock.nixosModules.regionlock ];
       # The module closes over `self` for its default package (no overlay
