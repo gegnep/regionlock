@@ -20,8 +20,11 @@
           rust-analyzer
           cargo-nextest
 
-          # `nft --check -f` validates generated rulesets without root.
-          # Golden-file tests in core depend on it.
+          # nft is needed for the env-gated ruleset validation
+          # (REGIONLOCK_NFT_CHECK=1) and the privileged e2e verify. Note:
+          # `nft --check` still needs netlink cache init, so it does NOT
+          # run unprivileged on this host; golden tests byte-compare
+          # instead and the check runs during privileged verification.
           nftables
         ];
 
