@@ -1,0 +1,21 @@
+[package]
+name = "regionlock-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core library for regionlock: SDR feed model, desired state, plan/diff, nft codegen"
+
+[features]
+default = ["fetch"]
+# Network fetch of the SDR feed. regionlock-apply builds without this so the
+# privileged binary carries no HTTP stack.
+fetch = ["dep:ureq"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+etcetera.workspace = true
+ureq = { workspace = true, optional = true }

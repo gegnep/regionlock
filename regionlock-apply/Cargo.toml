@@ -1,0 +1,13 @@
+[package]
+name = "regionlock-apply"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Privileged applier for regionlock. Tiny and auditable; the only component that runs as root."
+
+# Security boundary: keep this dependency list minimal and reviewed.
+[dependencies]
+regionlock-core = { workspace = true, default-features = false }
+serde.workspace = true
+serde_json.workspace = true
