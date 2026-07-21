@@ -29,27 +29,57 @@ impl DesiredState {
     /// `block`: add the given POPs. The delta lists only POPs that were not
     /// already blocked.
     pub fn block(&mut self, pops: &[String]) -> Delta {
-        let _ = pops;
-        todo!("M1c")
+        let mut now_blocked = BTreeSet::new();
+        for pop in pops {
+            if self.blocked.insert(pop.clone()) {
+                now_blocked.insert(pop.clone());
+            }
+        }
+        Delta {
+            now_blocked: now_blocked.into_iter().collect(),
+            now_unblocked: Vec::new(),
+        }
     }
 
     /// `unblock`: remove the given POPs. The delta lists only POPs that were
     /// actually blocked.
     pub fn unblock(&mut self, pops: &[String]) -> Delta {
-        let _ = pops;
-        todo!("M1c")
+        let mut now_unblocked = BTreeSet::new();
+        for pop in pops {
+            if self.blocked.remove(pop) {
+                now_unblocked.insert(pop.clone());
+            }
+        }
+        Delta {
+            now_blocked: Vec::new(),
+            now_unblocked: now_unblocked.into_iter().collect(),
+        }
     }
 
     /// `allow` (exclusive): block every POP in `all_blockable` except those
     /// in `keep`. The delta reflects the difference from the previous state.
     pub fn allow(&mut self, keep: &[String], all_blockable: &[String]) -> Delta {
-        let _ = (keep, all_blockable);
-        todo!("M1c")
+        let keep: BTreeSet<&String> = keep.iter().collect();
+        let target: BTreeSet<String> = all_blockable
+            .iter()
+            .filter(|pop| !keep.contains(pop))
+            .cloned()
+            .collect();
+        let now_blocked: Vec<String> = target.difference(&self.blocked).cloned().collect();
+        let now_unblocked: Vec<String> = self.blocked.difference(&target).cloned().collect();
+        self.blocked = target;
+        Delta {
+            now_blocked,
+            now_unblocked,
+        }
     }
 
     /// `reset`: clear desired state (never touches the firewall; that is
     /// `teardown`).
     pub fn reset(&mut self) -> Delta {
-        todo!("M1c")
+        Delta {
+            now_blocked: Vec::new(),
+            now_unblocked: std::mem::take(&mut self.blocked).into_iter().collect(),
+        }
     }
 }
