@@ -14,6 +14,7 @@ pub mod error;
 pub mod feed;
 pub mod game;
 pub mod payload;
+pub mod ping;
 pub mod plan;
 pub mod regions;
 pub mod state;

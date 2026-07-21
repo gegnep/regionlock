@@ -41,6 +41,9 @@ pub struct Config {
     pub default_game: Game,
     pub apply_mode: ApplyMode,
     pub escalator: Escalator,
+    /// Reference POP for latency estimates when live probing is unavailable
+    /// (see ping module). None = no estimates, values show as unknown.
+    pub home_pop: Option<String>,
     /// Per-game desired state and presets (user decision Q3: per-game).
     /// TOML tables require string keys; `Game` is an enum, so this field
     /// round-trips through `Game::name()` / `Game::from_str` instead of
@@ -99,6 +102,7 @@ impl Default for Config {
             default_game: Game::Deadlock,
             apply_mode: ApplyMode::default(),
             escalator: Escalator::default(),
+            home_pop: None,
             games: BTreeMap::new(),
         }
     }
