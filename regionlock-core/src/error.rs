@@ -16,6 +16,12 @@ pub enum Error {
     #[error("no cached feed for {game} and --offline was requested")]
     NoCachedFeed { game: crate::Game },
 
+    /// The XDG cache directory could not be determined (no home directory).
+    /// Separate from `Io`: etcetera's HomeDirError carries no path and is
+    /// not an io::Error.
+    #[error("could not determine the XDG cache directory: {reason}")]
+    CacheDirUnavailable { reason: String },
+
     #[error("unknown POP or region selector {selector:?}")]
     UnknownSelector { selector: String },
 
@@ -64,6 +70,7 @@ impl Error {
             Error::FeedFetch { .. } => "feed_fetch",
             Error::FeedParse(_) => "feed_parse",
             Error::NoCachedFeed { .. } => "no_cached_feed",
+            Error::CacheDirUnavailable { .. } => "cache_dir_unavailable",
             Error::UnknownSelector { .. } => "unknown_selector",
             Error::Config { .. } => "config",
             Error::UnknownPreset { .. } => "unknown_preset",
