@@ -15,12 +15,17 @@ fn run_applier(input: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("regionlock-apply starts");
-    child
-        .stdin
-        .take()
-        .expect("stdin is piped")
-        .write_all(input)
-        .expect("operation reaches applier stdin");
+    // The applier runs the root check BEFORE reading stdin, so when it is
+    // unprivileged it refuses and exits before consuming our input. A
+    // BrokenPipe on this write is therefore expected, not a failure; the
+    // refusal contract is the reply on stdout (checked by refused_reason).
+    if let Some(mut stdin) = child.stdin.take() {
+        match stdin.write_all(input) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(e) => panic!("unexpected stdin write error: {e}"),
+        }
+    }
     child.wait_with_output().expect("applier exits")
 }
 

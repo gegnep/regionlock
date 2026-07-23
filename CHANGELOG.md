@@ -3,6 +3,16 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 regionlock uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-07-23
+
+### Fixed
+
+- Flaky applier test (`unsupported_version_is_refused`) that failed the build
+  with a BrokenPipe under some schedulers. The applier refuses (root check)
+  before reading stdin, so a writer can hit EPIPE; the test and the CLI's
+  applier-invocation path now tolerate it and rely on the reply for the
+  outcome. Fixes `nix flake check` / package builds failing intermittently.
+
 ## [1.0.0] - 2026-07-21
 
 First release.
@@ -34,4 +44,5 @@ First release.
   time.
 - Nix flake: package, NixOS module (`programs.regionlock`), and overlay.
 
+[1.0.1]: https://github.com/gegnep/regionlock/releases/tag/v1.0.1
 [1.0.0]: https://github.com/gegnep/regionlock/releases/tag/v1.0.0

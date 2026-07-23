@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "regionlock"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "regionlock-apply"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "libc",
  "regionlock-core",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "regionlock-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "etcetera",
  "libc",
