@@ -5,7 +5,6 @@
 //! operation travels over the child's stdin (never env, never argv), and
 //! the applier's single JSON reply comes back on stdout.
 
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -142,16 +141,10 @@ fn drive(mut cmd: Command, payload: &str) -> std::result::Result<Reply, String> 
         .stderr(Stdio::inherit()) // auth prompts (sudo/doas) talk to the tty
         .spawn()
         .map_err(|e| format!("spawn failed: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        // The applier can refuse and exit before reading stdin (e.g. its root
-        // check); a BrokenPipe here is not fatal, because its reply on stdout
-        // is authoritative. Other write errors still propagate.
-        match stdin.write_all(payload.as_bytes()) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
-            Err(e) => return Err(format!("could not send operation: {e}")),
-        }
-    }
+    // BrokenPipe-tolerant: the applier may exit before reading stdin.
+    // See [`crate::child_io`] for the contract.
+    crate::child_io::write_stdin_tolerating_broken_pipe(&mut child, payload.as_bytes())
+        .map_err(|e| format!("could not send operation: {e}"))?;
     let output = child
         .wait_with_output()
         .map_err(|e| format!("did not exit: {e}"))?;

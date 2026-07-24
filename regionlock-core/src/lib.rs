@@ -9,6 +9,7 @@
 //!   exit-code mapping.
 
 pub mod backend;
+pub mod child_io;
 pub mod config;
 pub mod error;
 pub mod escalate;

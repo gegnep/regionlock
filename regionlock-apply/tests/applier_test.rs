@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::net::Ipv4Addr;
 use std::process::{Command, Output, Stdio};
 
@@ -15,17 +14,10 @@ fn run_applier(input: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("regionlock-apply starts");
-    // The applier runs the root check BEFORE reading stdin, so when it is
-    // unprivileged it refuses and exits before consuming our input. A
-    // BrokenPipe on this write is therefore expected, not a failure; the
-    // refusal contract is the reply on stdout (checked by refused_reason).
-    if let Some(mut stdin) = child.stdin.take() {
-        match stdin.write_all(input) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
-            Err(e) => panic!("unexpected stdin write error: {e}"),
-        }
-    }
+    // The unprivileged applier refuses before reading stdin; BrokenPipe is
+    // expected here. See regionlock_core::child_io for the contract.
+    regionlock_core::child_io::write_stdin_tolerating_broken_pipe(&mut child, input)
+        .expect("unexpected stdin write error");
     child.wait_with_output().expect("applier exits")
 }
 
