@@ -672,18 +672,22 @@ fn nft(args: &[&str]) -> Result<String, String> {
 }
 
 fn run_nft_stdin(ruleset: &str) -> Result<(), String> {
-    let mut child = Command::new("nft")
-        .args(["-f", "-"])
+    let mut cmd = Command::new("nft");
+    cmd.args(["-f", "-"]);
+    run_nft_stdin_with(cmd, ruleset)
+}
+
+/// Command seam for [`run_nft_stdin`]; tests pass a stub command.
+fn run_nft_stdin_with(mut cmd: Command, ruleset: &str) -> Result<(), String> {
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("could not run nft (is nftables installed?): {e}"))?;
-    child
-        .stdin
-        .take()
-        .expect("stdin piped")
-        .write_all(ruleset.as_bytes())
+    // BrokenPipe-tolerant: nft can reject input and exit before draining
+    // stdin. Its stderr and exit status carry the real reason.
+    regionlock_core::child_io::write_stdin_tolerating_broken_pipe(&mut child, ruleset.as_bytes())
         .map_err(|e| format!("could not feed nft: {e}"))?;
     let output = child
         .wait_with_output()
@@ -860,6 +864,23 @@ mod tests {
             Vec::<String>::new()
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn nft_stderr_survives_early_exit_before_stdin_drain() {
+        // Stub nft: close stdin, report a diagnostic, fail. The 1 MiB
+        // ruleset exceeds the pipe buffer, so the stdin write hits a
+        // deterministic BrokenPipe. The diagnostic must still surface.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exec 0<&-; echo 'known diagnostic' >&2; exit 1"]);
+        let ruleset = "x".repeat(1 << 20);
+
+        let err = run_nft_stdin_with(cmd, &ruleset).expect_err("stub nft fails");
+
+        assert!(
+            err.contains("nft rejected the ruleset") && err.contains("known diagnostic"),
+            "err was: {err}"
+        );
     }
 
     #[test]
