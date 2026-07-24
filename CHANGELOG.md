@@ -3,6 +3,20 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 regionlock uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-07-24
+
+### Fixed
+
+- `regionlock-apply` no longer masks nft's error output. When nft exited
+  before draining stdin, the applier reported "Broken pipe" instead of
+  nft's stderr. A shared BrokenPipe-tolerant write helper
+  (`regionlock_core::child_io`) now serves all child stdin writers, with
+  a regression test.
+- The child stdin writers fail fast again when stdin is not piped,
+  instead of silently skipping the write.
+- The applier contract now states the early-exit invariant. The stdout
+  reply is the sole authoritative outcome.
+
 ## [1.0.1] - 2026-07-23
 
 ### Fixed
@@ -45,5 +59,6 @@ First release.
   time.
 - Nix flake: package, NixOS module (`programs.regionlock`), and overlay.
 
+[1.0.2]: https://github.com/gegnep/regionlock/releases/tag/v1.0.2
 [1.0.1]: https://github.com/gegnep/regionlock/releases/tag/v1.0.1
 [1.0.0]: https://github.com/gegnep/regionlock/releases/tag/v1.0.0

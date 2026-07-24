@@ -9,7 +9,7 @@
 
 rustPlatform.buildRustPackage {
   pname = "regionlock";
-  version = "1.0.1";
+  version = "1.0.2";
 
   src = lib.cleanSourceWith {
     src = ../.;
