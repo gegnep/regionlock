@@ -14,6 +14,8 @@ regionlock uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a regression test.
 - The child stdin writers fail fast again when stdin is not piped,
   instead of silently skipping the write.
+- The applier now feeds nft's stdin from a thread while it drains
+  stderr. A stderr flood can no longer deadlock an apply.
 - The applier contract now states the early-exit invariant. The stdout
   reply is the sole authoritative outcome.
 
@@ -24,7 +26,7 @@ regionlock uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Flaky applier test (`unsupported_version_is_refused`) that failed the build
   with a BrokenPipe under some schedulers. The applier checks root before it
   reads stdin, so an unprivileged run exits without consuming the operation.
-  The writer then hits a BrokenPipe. The test and the CLI's applier path now
+  The writer can then hit a BrokenPipe. The test and the CLI's applier path now
   tolerate it and trust the stdout reply. This fixes intermittent
   `nix flake check` and package build failures.
 

@@ -688,21 +688,29 @@ fn run_nft_stdin_with(mut cmd: Command, ruleset: &str) -> Result<(), String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("could not run nft (is nftables installed?): {e}"))?;
-    // BrokenPipe-tolerant: nft can reject input and exit before draining
-    // stdin. Its stderr and exit status carry the real reason.
-    regionlock_core::child_io::write_stdin_tolerating_broken_pipe(&mut child, ruleset.as_bytes())
-        .map_err(|e| format!("could not feed nft: {e}"))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("nft did not exit cleanly: {e}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
+    // Feed stdin from a thread while wait_with_output drains stderr: a
+    // child that fills stderr mid-read cannot deadlock the write.
+    // BrokenPipe stays tolerated; see regionlock_core::child_io.
+    let stdin = child.stdin.take().expect("stdin piped");
+    let (output, fed) = std::thread::scope(|s| {
+        let writer = s.spawn(|| {
+            regionlock_core::child_io::write_tolerating_broken_pipe(stdin, ruleset.as_bytes())
+        });
+        let output = child.wait_with_output();
+        (
+            output,
+            writer.join().expect("stdin writer thread completes"),
+        )
+    });
+    let output = output.map_err(|e| format!("nft did not exit cleanly: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
             "nft rejected the ruleset: {}",
             String::from_utf8_lossy(&output.stderr)
-        ))
+        ));
     }
+    fed.map_err(|e| format!("could not feed nft: {e}"))?;
+    Ok(())
 }
 
 /// 0644 atomic write within /run/regionlock (tmp + rename, O_NOFOLLOW).
@@ -871,12 +879,12 @@ mod tests {
 
     #[test]
     fn nft_stderr_survives_early_exit_before_stdin_drain() {
-        // Stub nft: close stdin, report a diagnostic, fail. The 1 MiB
-        // ruleset exceeds the pipe buffer, so the stdin write hits a
-        // deterministic BrokenPipe. The diagnostic must still surface.
+        // Stub nft: close stdin, report a diagnostic, fail. The 4 MiB
+        // ruleset exceeds any default pipe capacity, so the stdin write
+        // hits a deterministic BrokenPipe. The diagnostic must surface.
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "exec 0<&-; echo 'known diagnostic' >&2; exit 1"]);
-        let ruleset = "x".repeat(1 << 20);
+        let ruleset = "x".repeat(4 << 20);
 
         let err = run_nft_stdin_with(cmd, &ruleset).expect_err("stub nft fails");
 
@@ -884,6 +892,25 @@ mod tests {
             err.contains("nft rejected the ruleset") && err.contains("known diagnostic"),
             "err was: {err}"
         );
+    }
+
+    #[test]
+    fn nft_stderr_flood_does_not_deadlock_the_stdin_write() {
+        // Stub nft floods stderr past the pipe buffer BEFORE reading
+        // stdin, then drains stdin and fails. A sequential write
+        // deadlocks here: the writer blocks on a full stdin pipe while
+        // the child blocks on a full stderr pipe.
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "head -c 131072 /dev/zero | tr '\\0' e >&2; cat >/dev/null; \
+             echo 'known diagnostic' >&2; exit 1",
+        ]);
+        let ruleset = "x".repeat(4 << 20);
+
+        let err = run_nft_stdin_with(cmd, &ruleset).expect_err("stub nft fails");
+
+        assert!(err.contains("known diagnostic"), "err was: {err}");
     }
 
     #[test]
