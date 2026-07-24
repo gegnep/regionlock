@@ -8,10 +8,11 @@ regionlock uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Flaky applier test (`unsupported_version_is_refused`) that failed the build
-  with a BrokenPipe under some schedulers. The applier refuses (root check)
-  before reading stdin, so a writer can hit EPIPE; the test and the CLI's
-  applier-invocation path now tolerate it and rely on the reply for the
-  outcome. Fixes `nix flake check` / package builds failing intermittently.
+  with a BrokenPipe under some schedulers. The applier checks root before it
+  reads stdin, so an unprivileged run exits without consuming the operation.
+  The writer then hits a BrokenPipe. The test and the CLI's applier path now
+  tolerate it and trust the stdout reply. This fixes intermittent
+  `nix flake check` and package build failures.
 
 ## [1.0.0] - 2026-07-21
 

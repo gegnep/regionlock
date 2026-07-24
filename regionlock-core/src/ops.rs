@@ -6,6 +6,10 @@
 //! table name, or a filesystem path. Every field the applier interpolates
 //! into anything is validated here first. Keep this module dependency-free
 //! beyond serde (the applier compiles core without default features).
+//!
+//! The applier can refuse and exit before reading stdin (root check
+//! first). Its single stdout [`Reply`] is the sole authoritative
+//! outcome; writers tolerate BrokenPipe via [`crate::child_io`].
 
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;

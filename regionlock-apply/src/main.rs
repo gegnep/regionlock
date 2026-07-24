@@ -3,6 +3,9 @@
 //! Contract (SPEC, privilege model):
 //! - Reads exactly ONE typed [`Operation`] as JSON from stdin (never env,
 //!   never argv paths). Input is size-capped.
+//! - May refuse and exit before reading stdin (root check runs first).
+//!   Writers must tolerate BrokenPipe; the stdout [`Reply`] is the sole
+//!   authoritative outcome (see `regionlock_core::child_io`).
 //! - Validates it via [`Operation::validate`] before acting; refusals are
 //!   reported as a [`Reply::Refused`] on stdout with exit code 1.
 //! - Acts ONLY on `table inet regionlock` and the fixed paths under
