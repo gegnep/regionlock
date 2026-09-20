@@ -82,7 +82,7 @@ service. The applier recognizes that service as module-managed and skips
 
 Prefer `inputs.nixpkgs.follows = "nixpkgs"`. The applier's runtime deps
 (nftables, systemd) then match your system. This needs a nixpkgs with rustc
-1.85 or newer, for edition 2024.
+1.88 or newer: edition 2024, let-chains, and the `etcetera` 0.11 dependency.
 
 `overlays.default` exposes `pkgs.regionlock` if you would rather not use the
 module.
